@@ -1,3 +1,7 @@
+Version 0.3.4   Sept 05, 2022
+Ulf Zibis <Ulf.Zibis@CoSoCo.de>
+* Small improvements in comments and logging; Renamings.
+
 Version 0.3.3   Aug 27, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Optionally compare file contents upon prefs; This can take time.
