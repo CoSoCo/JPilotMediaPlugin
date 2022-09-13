@@ -78,18 +78,21 @@ static prefType prefs[] = {
     // audio caption (CDMA phones)
     {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.3gp.3g2.amr.qcp" , 256},
     {"useDateModified", INTTYPE, INTTYPE, 0, NULL, 0},
-    {"compareContent", INTTYPE, INTTYPE, 0, NULL, 0}
+    {"compareContent", INTTYPE, INTTYPE, 0, NULL, 0},
+    {"doBackup", INTTYPE, INTTYPE, 1, NULL, 0},
+    {"doRestore", INTTYPE, INTTYPE, 1, NULL, 0}
 };
-// ToDo: onlyBackup; onlyRestore
 static const unsigned NUM_PREFS = sizeof(prefs)/sizeof(prefType);
 static long syncThumbnailDir;
 static char *fileTypes; // becomes freed by jp_free_prefs()
 static long useDateModified;
 static long compareContent;
+static long doBackup;
+static long doRestore;
 static fileType *fileTypeList = NULL;
 static pi_buffer_t *piBuf, *piBuf2;
 static int importantWarning = 0;
-static char SyncLogEntry[128];
+static char syncLogEntry[128];
 
 void *mallocLog(size_t);
 int volumeEnumerateIncludeHidden(const int, int *, int *);
@@ -138,6 +141,10 @@ int plugin_startup(jp_startup_info *info) {
         jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[2].name);
     if (jp_get_pref(prefs, 3, &compareContent, NULL) < 0)
         jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[3].name);
+    if (jp_get_pref(prefs, 4, &doBackup, NULL) < 0)
+        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[4].name);
+    if (jp_get_pref(prefs, 5, &doRestore, NULL) < 0)
+        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[5].name);
     if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // To initialize with defaults, if pref file wasn't existent.
         jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE);
     for (char *last; (last = strrchr(fileTypes, '.')) >= fileTypes; *last = 0) {
@@ -189,16 +196,16 @@ int plugin_sync(int sd) {
     for (int i=0; i<volumes; i++) {
         PI_ERR volResult;
         if ((volResult = syncVolume(sd, volRefs[i])) < -2) {
-            snprintf(SyncLogEntry, sizeof(SyncLogEntry),
+            snprintf(syncLogEntry, sizeof(syncLogEntry),
                     "%s:  WARNING: Could not find any media on volume %d; No media synced.\n", MYNAME, volRefs[i]);
-            jp_logf(L_WARN, SyncLogEntry);
-            dlp_AddSyncLogEntry (sd, SyncLogEntry);
+            jp_logf(L_WARN, syncLogEntry);
+            dlp_AddSyncLogEntry (sd, syncLogEntry);
             goto Continue;
         } else if (volResult < 0) {
-            snprintf(SyncLogEntry, sizeof(SyncLogEntry),
+            snprintf(syncLogEntry, sizeof(syncLogEntry),
                     "%s:  WARNING: Errors occured on volume %d; Some media may not be synced.\n", MYNAME, volRefs[i]);
-            jp_logf(L_WARN, SyncLogEntry);
-            dlp_AddSyncLogEntry (sd, SyncLogEntry);
+            jp_logf(L_WARN, syncLogEntry);
+            dlp_AddSyncLogEntry (sd, syncLogEntry);
         }
         result = EXIT_SUCCESS;
 Continue:
@@ -209,6 +216,7 @@ Continue:
     if (importantWarning) {
         jp_logf(L_WARN, "\n%s: IMPORTANT WARNING: Now open once the Media App on your Palm device to avoid crash (signal SIGCHLD) on next HotSync !!!\n\n", MYNAME);
         dlp_AddSyncLogEntry (sd, MYNAME": IMPORTANT WARNING: Now open once the Media App to avoid crash with JPilot on next HotSync !!!\n");
+        // Avoids bug <https://github.com/desrod/pilot-link/issues/10>, as then the file "Album.db" is created, so the dir is not empty anymore.
     }
 
     return result;
@@ -621,7 +629,7 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
         itr = (unsigned long)vfsIteratorStart; // workaround, reset itr if it wrongly was -1 or 1888
         jp_logf(L_DEBUG, "%s:     Enumerate album '%s', dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, rmAlbumDir, dirRef, itr, dirItems);
         if ((result = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &dirItems, dirInfos)) < 0) {
-            // Crashes on empty directory (see: <https://github.com/juddmon/jpilot/issues/??>):
+            // Crashes on empty directory (see: <https://github.com/desrod/pilot-link/issues/11>):
             // Further research is neccessary (see: <https://github.com/juddmon/jpilot/issues/41>):
             // - Why in case of i.e. setting dirItems=4, itr != 0, even if there are more than 4 files?
             // - Why then on SDCard itr == 1888 in the first loop, so out of allowed range?
@@ -639,7 +647,7 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
     jp_logf(L_DEBUG, "%s:     Now first search of local files, which to restore ...\n", MYNAME);
     // First iterate over all the local files in the album dir, to prevent from back-storing renamed files,
     // so only looking for remotely unknown files ... and then restore them.
-    for (struct dirent *entry; (entry = readdir(lcDirP));) {
+    for (struct dirent *entry; doRestore && (entry = readdir(lcDirP));) {
         jp_logf(L_DEBUG, "%s:      Found local file: '%s' type=%d\n", MYNAME, entry->d_name, entry->d_type);
         // Intentionally remove the remote file for debugging purpose:
         //~ if (!strncasecmp(entry->d_name, "New_", 4)) { // Copy must exist locally.
@@ -672,7 +680,7 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
     }
     jp_logf(L_DEBUG, "%s:     Now search of %d remote files, which to backup ...\n", MYNAME, dirItems);
     // Iterate over all the remote files in the album dir, looking for un-synced files.
-    for (int i=0; i<dirItems; i++) {
+    for (int i=0; doBackup && i<dirItems; i++) {
         char *fname = dirInfos[i].name;
         jp_logf(L_DEBUG, "%s:      Found remote file '%s' attributes=%x\n", MYNAME, fname, dirInfos[i].attr);
         // Grab only regular files, but ignore the 'read only' and 'archived' bits,
