@@ -70,7 +70,7 @@ static prefType prefs[] = {
     // video (CDMA phones)
     // audio caption (GSM phones)
     // audio caption (CDMA phones)
-    {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.3gp.3g2.amr.qcp" , 256},
+    {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.3gp.3g2.avi.amr.qcp" , 256},
     {"useDateModified", INTTYPE, INTTYPE, 0, NULL, 0},
     {"compareContent", INTTYPE, INTTYPE, 0, NULL, 0},
     {"doBackup", INTTYPE, INTTYPE, 1, NULL, 0},
