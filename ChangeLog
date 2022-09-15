@@ -1,6 +1,7 @@
-Version 0.4.1   Sept 13, 2022
+Version 0.4.1   Sept 15, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Added prefs doBackup, doRestore, to allow uniderectional sync.
+* Using fileRead(), fileWrite() for copying files; Renamings.
 
 Version 0.4   Sept 12, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>

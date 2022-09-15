@@ -54,20 +54,14 @@ static const char HELP_TEXT[] =
 Contributor (2022): Ulf Zibis <Ulf.Zibis@CoSoCo.de>\n\
 Version: "VERSION"\n\
 \n\
-Synchronizes media as pictures, videos and audios from the\n\
-Pics&Videos storage in the Palm and from SDCard with\n\
+Synchronizes media as pictures, videos and audios from\n\
+the Pics&Videos storage and SDCard in the Palm with\n\
 folder '"PCDIR"' in your JPilot data directory,\n\
 usually \"$JPILOT_HOME/.jpilot\".\n\
 \n\
 For more documentation, bug reports and new versions,\n\
 see https://github.com/danbodoh/picsnvideos-jpilot";
 
-static const unsigned MAX_VOLUMES = 16;
-static const unsigned MIN_DIR_ITEMS = 2;
-static const unsigned MAX_DIR_ITEMS = 1024;
-static const char *ROOTDIRS[] = {"Photos & Videos", "Fotos & Videos", "DCIM"};
-static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"};
-static char lcPath[NAME_MAX];
 static const char *PREFS_FILE = "picsnvideos.rc";
 static prefType prefs[] = {
     {"syncThumbnailDir", INTTYPE, INTTYPE, 0, NULL, 0},
@@ -89,10 +83,18 @@ static long useDateModified;
 static long compareContent;
 static long doBackup;
 static long doRestore;
+
+static const unsigned MAX_VOLUMES = 16;
+static const unsigned MIN_DIR_ITEMS = 2;
+static const unsigned MAX_DIR_ITEMS = 1024;
+static const char *ROOTDIRS[] = {"Photos & Videos", "Fotos & Videos", "DCIM"};
+static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"};
 static fileType *fileTypeList = NULL;
+static char lcPath[NAME_MAX];
 static pi_buffer_t *piBuf, *piBuf2;
 static int importantWarning = 0;
 static char syncLogEntry[128];
+
 
 void *mallocLog(size_t);
 int volumeEnumerateIncludeHidden(const int, int *, int *);
@@ -160,8 +162,7 @@ int plugin_startup(jp_startup_info *info) {
         }
     }
     jp_free_prefs(prefs, NUM_PREFS);
-    if (!result && (result = !(piBuf = pi_buffer_new(65536)) || !(piBuf2 = pi_buffer_new(65536))))
-    //~ if (!result && (result = !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))))
+    if (!result && (result = !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))))
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
     return result;
 }
@@ -223,12 +224,12 @@ Continue:
 }
 
 int plugin_exit_cleanup(void) {
+    pi_buffer_free(piBuf);
+    pi_buffer_free(piBuf2);
     for (fileType *tmp; (tmp = fileTypeList);) {
         fileTypeList = fileTypeList->next;
         free(tmp);
     }
-    pi_buffer_free(piBuf);
-    pi_buffer_free(piBuf2);
     return EXIT_SUCCESS;
 }
 
@@ -282,20 +283,19 @@ Exit:
     return NULL;
 }
 
-// ToDo: Replace filesize by todo or sizeleft
-int fileRead(const int sd, FileRef fileRef, FILE *stream, pi_buffer_t *buf, int filesize) {
-    pi_buffer_clear(buf);
-    for (int readsize = -1, todo = filesize > buf->allocated ? buf->allocated : filesize; todo > 0; todo -= readsize) {
+int fileRead(const int sd, FileRef fileRef, FILE *fileP, pi_buffer_t *buf, int remaining) {
+    buf->used = 0;
+    for (int readsize = 0, todo = remaining > buf->allocated ? buf->allocated : remaining; todo > 0; todo -= readsize) {
         if (fileRef) {
             readsize = dlp_VFSFileRead(sd, fileRef, buf, todo);
             //readsize = dlp_VFSFileRead(sd, fileRef, buf, buf->allocated); // works too, but is very slow
-        } else if (stream) {
-            readsize = fread(buf->data + buf->used, 1, todo, stream);
-            buf->used += readsize;
+        } else if (fileP) {
+            readsize = fread(buf->data + buf->used, 1, todo, fileP);
+            buf->used += (size_t)readsize;
         }
         if (readsize < 0) {
-            jp_logf(L_FATAL, "\n%s:       ERROR: File read error: %d; aborting at %d bytes left.\n", MYNAME, readsize, filesize - buf->used);
-            if (readsize == PI_ERR_DLP_PALMOS)
+            jp_logf(L_FATAL, "\n%s:       ERROR: File read error: %d; aborting at %d bytes left.\n", MYNAME, readsize, remaining - buf->used);
+            if (fileRef && readsize == PI_ERR_DLP_PALMOS)
                 jp_logf(L_FATAL, "%s:       ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
             return readsize;
         }
@@ -303,17 +303,16 @@ int fileRead(const int sd, FileRef fileRef, FILE *stream, pi_buffer_t *buf, int 
     return (int)buf->used;
 }
 
-// ToDo: Replace filesize by todo or sizeleft
-int fileWrite(const int sd, FileRef fileRef, FILE *stream, pi_buffer_t *buf, int filesize) {
+int fileWrite(const int sd, FileRef fileRef, FILE *fileP, pi_buffer_t *buf, int remaining) {
     for (int writesize = 0, offset = 0; offset < buf->used; offset += writesize) {
         if (fileRef) {
             writesize = dlp_VFSFileWrite(sd, fileRef, buf->data + offset, buf->used - offset);
-        } else if (stream) {
-            writesize = fwrite(buf->data + offset, 1, buf->used - offset, stream);
+        } else if (fileP) {
+            writesize = fwrite(buf->data + offset, 1, buf->used - offset, fileP);
         }
         if (writesize < 0) {
-            jp_logf(L_FATAL, "\n%s:       ERROR: File write error: %d; aborting at %d bytes left.\n", MYNAME, writesize, filesize - buf->used - offset);
-            if (writesize == PI_ERR_DLP_PALMOS)
+            jp_logf(L_FATAL, "\n%s:       ERROR: File write error: %d; aborting at %d bytes left, offset=%d.\n", MYNAME, writesize, remaining - offset, offset);
+            if (fileRef && writesize == PI_ERR_DLP_PALMOS)
                 jp_logf(L_FATAL, "%s:       ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
             return writesize;
         }
@@ -321,10 +320,10 @@ int fileWrite(const int sd, FileRef fileRef, FILE *stream, pi_buffer_t *buf, int
     return (int)buf->used;
 }
 
-int fileCompare(const int sd, FileRef fileRef, FILE *stream, int filesize) {
+int fileCompare(const int sd, FileRef fileRef, FILE *fileP, int filesize) {
     int result;
     for (int todo = filesize; todo > 0; todo -= piBuf->used) {
-        if (fileRead(sd, fileRef, NULL, piBuf, todo) < 0 || fileRead(0, 0, stream, piBuf2, todo) < 0 || piBuf->used != piBuf2->used) {
+        if (fileRead(sd, fileRef, NULL, piBuf, todo) < 0 || fileRead(0, 0, fileP, piBuf2, todo) < 0 || piBuf->used != piBuf2->used) {
             jp_logf(L_FATAL, "%s:       ERROR: reading files for comparison, so assuming different ...\n", MYNAME);
             jp_logf(L_DEBUG, "%s:       filesize=%d, todo=%d, piBuf->used=%d, piBuf2->used=%d\n", MYNAME, filesize, todo, piBuf->used, piBuf2->used);
             result = -1; // remember error
@@ -344,6 +343,7 @@ int backupFileIfNeeded(const int sd, const unsigned volRef, const char *rmDir, c
     char rmPath[strlen(rmDir) + strlen(file) + 2];
     char lcPath[strlen(lcDir) + strlen(file) + 4]; // prepare for possible rename
     FileRef fileRef;
+    FILE *fileP;
     int filesize; // also serves as error return code
 
     strcat(strcat(strcpy(rmPath, rmDir), "/"), file);
@@ -353,7 +353,7 @@ int backupFileIfNeeded(const int sd, const unsigned volRef, const char *rmDir, c
         jp_logf(L_FATAL, "%s:       ERROR: Could not open remote file '%s' on volume %d for reading.\n", MYNAME, rmPath, volRef);
         return -1;
     }
-    if (dlp_VFSFileSize(sd, fileRef, (int *)(&filesize)) < 0) {
+    if (dlp_VFSFileSize(sd, fileRef, &filesize) < 0) {
         jp_logf(L_WARN, "%s:       WARNING: Could not get size of '%s' on volume %d, so anyway backup it.\n", MYNAME, rmPath, volRef);
         filesize = 0;
     }
@@ -367,13 +367,13 @@ int backupFileIfNeeded(const int sd, const unsigned volRef, const char *rmDir, c
         } else if (!compareContent) {
             equal = 1;
         } else {
-            FILE *lcStream;
-            if (!(lcStream = fopen(lcPath, "r"))) {
+            FILE *fileP;
+            if (!(fileP = fopen(lcPath, "r"))) {
                 jp_logf(L_WARN, "%s:       WARNING: Cannot open %s for comparing %d bytes, so may have different content,\n", MYNAME, lcPath, filesize);
             } else {
-                if (!(equal = !fileCompare(sd, fileRef, lcStream, filesize)))
+                if (!(equal = !fileCompare(sd, fileRef, fileP, filesize)))
                     jp_logf(L_WARN, "%s:       WARNING: File '%s' already exists, but has different content,\n", MYNAME, lcPath);
-                fclose(lcStream);
+                fclose(fileP);
                 if (dlp_VFSFileSeek(sd, fileRef, vfsOriginBeginning, 0) < 0) {
                     jp_logf(L_FATAL, "%s:       ERROR: On file seek; So can not copy '%s', aborting ...\n", MYNAME, file);
                     filesize = -1; // remember error
@@ -396,37 +396,27 @@ int backupFileIfNeeded(const int sd, const unsigned volRef, const char *rmDir, c
                 goto Exit;
             }
         }
-        jp_logf(L_WARN, "%s:               so backup '%s' to '%s'.\n", MYNAME, file, lcPath);
+        jp_logf(L_WARN, "%s:               so backup to '%s'.\n", MYNAME, lcPath);
     }
     // File has not already been synced, backup it.
-    FILE *lcStream;
-    if (!(lcStream = fopen(lcPath, "wx"))) {
+    if (!(fileP = fopen(lcPath, "wx"))) {
         jp_logf(L_FATAL, "%s:       ERROR: Cannot open %s for writing %d bytes!\n", MYNAME, lcPath, filesize);
         filesize = -1; // remember error
         goto Exit;
     }
     // Copy file.
-    jp_logf(L_GUI, "%s:      Backing up %s ...", MYNAME, lcPath);
-    for (int readsize; filesize > 0; filesize -= piBuf->used) {
-        pi_buffer_clear(piBuf);
-        // ToDo: Use fileRead() and fileWrite()
-        if ((readsize = dlp_VFSFileRead(sd, fileRef, piBuf, (filesize > piBuf->allocated ? piBuf->allocated : filesize))) < 0)  {
-        //if (dlp_VFSFileRead(sd, fileRef, piBuf, piBuf->allocated) < 0)  { // works too, but is very slow
-            jp_logf(L_FATAL, "\n%s:       ERROR: File read error; aborting at %d bytes left.\n", MYNAME, filesize);
-            if (readsize == PI_ERR_DLP_PALMOS)
-                jp_logf(L_FATAL, "%s:       ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
-            filesize = readsize; // remember error
+    jp_logf(L_GUI, "%s:      Backup %s, size %d ...", MYNAME, rmPath, filesize);
+    for (int remaining = filesize; remaining > 0; remaining -= piBuf->used) {
+        if (fileRead(sd, fileRef, NULL, piBuf, remaining) < 0)  {
+            filesize = -1; // remember error
             break;
         }
-        for (int writesize, offset = 0; offset < piBuf->used; offset += writesize) {
-            if ((writesize = fwrite(piBuf->data + offset, 1, piBuf->used - offset, lcStream)) < 0) {
-                jp_logf(L_FATAL, "\n%s:       ERROR: File write error; aborting at %d bytes left.\n", MYNAME, filesize - offset);
-                filesize = writesize; // remember error; breaks the outer loop
-                break;
-            }
+        if (fileWrite(0, 0, fileP, piBuf, remaining) < 0) {
+            filesize = -1; // remember error
+            break;
         }
     }
-    fclose(lcStream);
+    fclose(fileP);
     if (filesize < 0) {
         unlink(lcPath); // remove the partially created file
         jp_logf(L_WARN, "%s:       WARNING: Deleted incomplete local file '%s'\n", MYNAME, lcPath);
@@ -461,7 +451,7 @@ Exit:
 int restoreFile(const int sd, const unsigned volRef, const char *lcDir, const char *rmDir, const char *file) {
     char lcPath[strlen(lcDir) + strlen(file) + 2];
     char rmPath[strlen(rmDir) + strlen(file) + 2];
-    FILE *stream;
+    FILE *fileP;
     FileRef fileRef;
     int filesize; // also serves as error return
     PI_ERR piErr;
@@ -476,7 +466,7 @@ int restoreFile(const int sd, const unsigned volRef, const char *lcDir, const ch
         return -1;
     }
     filesize = fstat.st_size;
-    if (!(stream = fopen(lcPath, "r"))) {
+    if (!(fileP = fopen(lcPath, "r"))) {
         jp_logf(L_FATAL, "%s:       ERROR: Could not open %s for reading %d bytes,\n", MYNAME, lcPath, filesize);
         return -1;
     }
@@ -498,17 +488,16 @@ int restoreFile(const int sd, const unsigned volRef, const char *lcDir, const ch
     }
 
     // Copy file.
-    jp_logf(L_GUI, "%s:      Restoring '%s' ...", MYNAME, rmPath);
-    for (; filesize > 0; filesize -= piBuf->used) {
-        if (fileRead(0, 0, stream, piBuf, filesize) < 0) {
+    jp_logf(L_GUI, "%s:      Restore '%s', size %d ...", MYNAME, lcPath, filesize);
+    for (int remaining = filesize; remaining > 0; remaining -= piBuf->used) {
+        if (fileRead(0, 0, fileP, piBuf, remaining) < 0) {
             filesize = -1; // remember error
             break;
         }
-        if (fileWrite(sd, fileRef, NULL, piBuf, filesize) < 0) {
+        if (fileWrite(sd, fileRef, NULL, piBuf, remaining) < 0) {
             filesize = -1; // remember error
             break;
         }
-        //~ jp_logf(L_DEBUG, "\n%s:       filesize=%d, piBuf->used=%d", MYNAME, filesize, piBuf->used);
     }
     if (filesize < 0) {
         dlp_VFSFileClose(sd, fileRef);
@@ -532,7 +521,7 @@ int restoreFile(const int sd, const unsigned volRef, const char *lcDir, const ch
     dlp_VFSFileClose(sd, fileRef);
 
 Exit:
-    fclose(stream);
+    fclose(fileP);
     jp_logf(L_DEBUG, "%s:       Restore file size / copy result: %d, statErr=%d\n", MYNAME, filesize, statErr);
     return filesize;
 }
@@ -557,9 +546,9 @@ int cmpRemote(VFSDirInfo dirInfos[], int dirItems, const char *fname) {
 /*
  * Synchonize a remote album with the matching local album and backup or restore the containing files in them.
  */
-PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR *lcDirP, const char *lcRoot, const char *name) {
-    char rmTmp[name ? strlen(rmRoot) + strlen(name) + 2 : 0], *rmAlbumDir;
-    char lcTmp[name ? strlen(lcRoot) + strlen(name) + 2 : 0], *lcAlbumDir;
+PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR *dirP, const char *lcRoot, const char *name) {
+    char rmTmp[name ? strlen(rmRoot) + strlen(name) + 2 : 0], *rmAlbum;
+    char lcTmp[name ? strlen(lcRoot) + strlen(name) + 2 : 0], *lcAlbum;
     int dirItems_init = MIN_DIR_ITEMS;
     VFSDirInfo dirInfos[MAX_DIR_ITEMS];
     struct stat fstat;
@@ -567,12 +556,12 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
     PI_ERR result = 0, piOSErr;
 
     if (name) {
-        rmAlbumDir = strcat(strcat(strcpy(rmTmp ,rmRoot), "/"), name);
-        if (lcDirP) { // indicates, that we are in restore-only mode, so need to create a new remote album dir.
-            jp_logf(L_DEBUG, "%s:    Try to create dir '%s' on volume %d\n", MYNAME, rmAlbumDir, volRef);
-            if ((result = dlp_VFSDirCreate(sd, volRef, rmAlbumDir)) < 0) {
+        rmAlbum = strcat(strcat(strcpy(rmTmp ,rmRoot), "/"), name);
+        if (dirP) { // indicates, that we are in restore-only mode, so need to create a new remote album dir.
+            jp_logf(L_DEBUG, "%s:    Try to create dir '%s' on volume %d\n", MYNAME, rmAlbum, volRef);
+            if ((result = dlp_VFSDirCreate(sd, volRef, rmAlbum)) < 0) {
                 if (result == PI_ERR_DLP_PALMOS && (piOSErr = pi_palmos_error(sd)) != 10758) { // File already exists.
-                    jp_logf(L_FATAL, "%s:    ERROR %d: Could not create dir '%s' on volume %d\n", MYNAME, result, rmAlbumDir, volRef);
+                    jp_logf(L_FATAL, "%s:    ERROR %d: Could not create dir '%s' on volume %d\n", MYNAME, result, rmAlbum, volRef);
                     jp_logf(L_FATAL, "%s:    ERROR: PalmOS error: %d.\n", MYNAME, piOSErr);
                     return -2;
                 }
@@ -580,20 +569,20 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
             importantWarning = 1;
             dirItems_init = 0; // prevent search on remote album
         }
-        jp_logf(L_DEBUG, "%s:    Try to open dir '%s' on volume %d\n", MYNAME, rmAlbumDir, volRef);
-        if (dlp_VFSFileOpen(sd, volRef, rmAlbumDir, vfsModeReadWrite, &dirRef) < 0) { // mode "Write" for setting date later
-            jp_logf(L_FATAL, "%s:    ERROR: Could not open dir '%s' on volume %d\n", MYNAME, rmAlbumDir, volRef);
+        jp_logf(L_DEBUG, "%s:    Try to open dir '%s' on volume %d\n", MYNAME, rmAlbum, volRef);
+        if (dlp_VFSFileOpen(sd, volRef, rmAlbum, vfsModeReadWrite, &dirRef) < 0) { // mode "Write" for setting date later
+            jp_logf(L_FATAL, "%s:    ERROR: Could not open dir '%s' on volume %d\n", MYNAME, rmAlbum, volRef);
             return -2;
         }
-        lcAlbumDir = strcpy(lcTmp, lcRoot);
+        lcAlbum = strcpy(lcTmp, lcRoot);
         jp_logf(L_DEBUG, "%s:    Try to create dir '%s' in '%s'\n", MYNAME, name, lcRoot);
-        if (createDir(lcAlbumDir, name)) {
+        if (createDir(lcAlbum, name)) {
             result = -2;
             goto Exit1;
         }
-        if (lcDirP) { // indicates, that we are in restore-only mode, so need to create a new remote album dir.
-            if ((statErr = stat(lcAlbumDir, &fstat))) {
-                jp_logf(L_FATAL, "%s:    ERROR: %d; Could not read status of %s; No sync possible!\n", MYNAME, statErr, lcAlbumDir);
+        if (dirP) { // indicates, that we are in restore-only mode, so need to set the date of the new created remote album dir.
+            if ((statErr = stat(lcAlbum, &fstat))) {
+                jp_logf(L_FATAL, "%s:    ERROR: %d; Could not read status of %s; No sync possible!\n", MYNAME, statErr, lcAlbum);
                 result = -2;
                 goto Exit1;
             }
@@ -601,20 +590,20 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
             // Set the date that the picture was created (not the file), aka modified time.
             if ((result = dlp_VFSFileSetDate(sd, dirRef, vfsFileDateModified, date)) < 0 ||
                     (result = dlp_VFSFileSetDate(sd, dirRef, vfsFileDateCreated, date)) < 0) {
-                jp_logf(L_WARN, "%s:    WARNING: %d; Could not set date of remote file '%s' on volume %d\n", MYNAME, result, rmAlbumDir, volRef);
+                jp_logf(L_WARN, "%s:    WARNING: %d; Could not set date of remote file '%s' on volume %d\n", MYNAME, result, rmAlbum, volRef);
                 if (result == PI_ERR_DLP_PALMOS)
                     jp_logf(L_FATAL, "%s:    ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
             }
         }
         jp_logf(L_DEBUG, "%s:    Try to open dir '%s' in '%s'\n", MYNAME, name, lcRoot);
-        if (!(lcDirP = opendir(lcAlbumDir))) {
+        if (!(dirP = opendir(lcAlbum))) {
             jp_logf(L_FATAL, "%s:    ERROR: Could not open dir '%s' on '%s'\n", MYNAME, name, lcRoot);
             result = -2;
             goto Exit1;
         }
     } else {
-        rmAlbumDir = (char *)rmRoot;
-        lcAlbumDir = (char *)lcRoot;
+        rmAlbum = (char *)rmRoot;
+        lcAlbum = (char *)lcRoot;
     }
     jp_logf(L_GUI, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, name ? name : ".", rmRoot, volRef);
     // Iterate over all the files in the remote album dir.
@@ -627,7 +616,7 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
     for (; (dirItems = dirItems_init) <= MAX_DIR_ITEMS && dirItems > 0; dirItems_init *= 2) { // WORKAROUND
         if (--loops < 0)  break; // for debugging
         itr = (unsigned long)vfsIteratorStart; // workaround, reset itr if it wrongly was -1 or 1888
-        jp_logf(L_DEBUG, "%s:     Enumerate album '%s', dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, rmAlbumDir, dirRef, itr, dirItems);
+        jp_logf(L_DEBUG, "%s:     Enumerate album '%s', dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, rmAlbum, dirRef, itr, dirItems);
         if ((result = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &dirItems, dirInfos)) < 0) {
             // Crashes on empty directory (see: <https://github.com/desrod/pilot-link/issues/11>):
             // Further research is neccessary (see: <https://github.com/juddmon/jpilot/issues/41>):
@@ -647,14 +636,15 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
     jp_logf(L_DEBUG, "%s:     Now first search of local files, which to restore ...\n", MYNAME);
     // First iterate over all the local files in the album dir, to prevent from back-storing renamed files,
     // so only looking for remotely unknown files ... and then restore them.
-    for (struct dirent *entry; doRestore && (entry = readdir(lcDirP));) {
+    for (struct dirent *entry; doRestore && (entry = readdir(dirP));) {
         jp_logf(L_DEBUG, "%s:      Found local file: '%s' type=%d\n", MYNAME, entry->d_name, entry->d_type);
-        // Intentionally remove the remote file for debugging purpose:
-        //~ if (!strncasecmp(entry->d_name, "New_", 4)) { // Copy must exist locally.
-        //~ if (!strncasecmp(entry->d_name, "Thumb_", 6)) { // Copy must exist locally.
+        //~ // Intentionally remove the remote file for debugging purpose:
+        //~ if (!strncasecmp(entry->d_name, "New_", 4)) { // Copy must exist locally, delete it after.
+        //~ if (!strncasecmp(entry->d_name, "Thumb_", 6)) { // Copy must exist locally, delete it after.
+        //~ if (!strcasecmp(entry->d_name, "New_BILD2255.JPG")) { // Copy must exist locally, delete it after.
             //~ PI_ERR piErr;
             //~ char toDelete[NAME_MAX];
-            //~ strcat(strcat(strcpy(toDelete ,rmAlbumDir), "/"), entry->d_name);
+            //~ strcat(strcat(strcpy(toDelete ,rmAlbum), "/"), entry->d_name);
             //~ if ((piErr = dlp_VFSFileDelete(sd, volRef, toDelete))) {
                 //~ jp_logf(L_FATAL, "%s:       ERROR: %d; Not deleted remote file '%s'\n", MYNAME, piErr, toDelete);
                 //~ if (piErr == PI_ERR_DLP_PALMOS)
@@ -663,7 +653,7 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
                 //~ jp_logf(L_WARN, "%s:       WARNING: Deleted remote file '%s' on volume %d\n", MYNAME, toDelete, volRef);
             //~ }
         char lcAlbumPath[NAME_MAX];
-        if ((statErr = stat(strcat(strcat(strcpy(lcAlbumPath, lcAlbumDir), "/"), entry->d_name), &fstat))) {
+        if ((statErr = stat(strcat(strcat(strcpy(lcAlbumPath, lcAlbum), "/"), entry->d_name), &fstat))) {
             jp_logf(L_FATAL, "%s:      ERROR: %d; Could not read status of %s; No sync possible!\n", MYNAME, statErr, lcAlbumPath);
             result = MIN(result, -1);
             continue;
@@ -674,8 +664,8 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
                 || !cmpRemote(dirInfos, dirItems, entry->d_name)) {
             continue;
         }
-        //~ jp_logf(L_DEBUG, "%s:      Restore local file: '%s' to '%s'\n", MYNAME, entry->d_name, rmAlbumDir);
-        int restoreResult = restoreFile(sd, volRef, lcAlbumDir, rmAlbumDir, entry->d_name);
+        //~ jp_logf(L_DEBUG, "%s:      Restore local file: '%s' to '%s'\n", MYNAME, entry->d_name, rmAlbum);
+        int restoreResult = restoreFile(sd, volRef, lcAlbum, rmAlbum, entry->d_name);
         result = MIN(result, restoreResult);
     }
     jp_logf(L_DEBUG, "%s:     Now search of %d remote files, which to backup ...\n", MYNAME, dirItems);
@@ -695,16 +685,16 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
                 || casecmpFileTypeList(fname)) {
             continue;
         }
-        //~ jp_logf(L_DEBUG, "%s:      Backup remote file: '%s' to '%s'\n", MYNAME, fname, lcAlbumDir);
-        int backupResult = backupFileIfNeeded(sd, volRef, rmAlbumDir, lcAlbumDir, fname);
+        //~ jp_logf(L_DEBUG, "%s:      Backup remote file: '%s' to '%s'\n", MYNAME, fname, lcAlbum);
+        int backupResult = backupFileIfNeeded(sd, volRef, rmAlbum, lcAlbum, fname);
         result = MIN(result, backupResult);
     }
 Exit2:
-    if (name)  closedir(lcDirP);
-    else  rewinddir(lcDirP);
+    if (name)  closedir(dirP);
+    else  rewinddir(dirP);
 Exit1:
     if (name)  dlp_VFSFileClose(sd, dirRef);
-    jp_logf(L_DEBUG, "%s:    Album '%s' done -> result=%d\n", MYNAME,  rmAlbumDir, result);
+    jp_logf(L_DEBUG, "%s:    Album '%s' done -> result=%d\n", MYNAME,  rmAlbum, result);
     return result;
 }
 
@@ -731,8 +721,8 @@ PI_ERR syncVolume(const int sd, int volRef) {
         char *lcRoot;
         if (!(lcRoot = localRoot(sd, volRef)))
             goto Continue1;
-        DIR *lcRootP;
-        if (!(lcRootP = opendir(lcRoot))) {
+        DIR *dirP;
+        if (!(dirP = opendir(lcRoot))) {
             jp_logf(L_DEBUG, "%s:   Root '%s' does not exist on '%s'\n", MYNAME, lcRoot + strlen(lcPath) + 1, lcPath);
             goto Continue2;
         }
@@ -740,8 +730,7 @@ PI_ERR syncVolume(const int sd, int volRef) {
 
         // Fetch the unfiled album, which is simply the root dir, and sync it.
         // Apparently the Treo 650 can store media in the root dir, as well as in album dirs.
-        result = syncAlbum(sd, volRef, dirRef, ROOTDIRS[d], lcRootP, lcRoot, NULL);
-        // ToDo: Print log if Error !
+        result = syncAlbum(sd, volRef, dirRef, ROOTDIRS[d], dirP, lcRoot, NULL);
 
         // Iterate through the remote root directory, looking for things that might be albums.
         int dirItems = 0;
@@ -771,7 +760,6 @@ PI_ERR syncVolume(const int sd, int volRef) {
                     jp_logf(L_DEBUG, "%s:    Found real remote album '%s' in '%s'\n", MYNAME, dirInfos[i].name, ROOTDIRS[d]);
                     PI_ERR albumResult = syncAlbum(sd, volRef, 0, ROOTDIRS[d], NULL, lcRoot, dirInfos[i].name);
                     result = MIN(result, albumResult);
-                    // ToDo: Print log if Error !
                 }
             }
         }
@@ -779,10 +767,10 @@ PI_ERR syncVolume(const int sd, int volRef) {
         // Now iterate over all the local files in the album dir. To prevent from back-storing renamed files,
         // only looking for remotely unknown albums ... and then restore them.
         jp_logf(L_DEBUG, "%s:   Now search for local albums in '%s' to restore ...\n", MYNAME, lcRoot);
-        for (struct dirent *entry; (entry = readdir(lcRootP));) {
+        for (struct dirent *entry; (entry = readdir(dirP));) {
             jp_logf(L_DEBUG, "%s:    Found local album candidate '%s' in '%s'; type %d\n", MYNAME, entry->d_name, lcRoot + strlen(lcPath) + 1, entry->d_type);
             //~ // Intentionally remove a remote album for debugging purpose:
-            //~ if (!strncasecmp(entry->d_name, "New_", 4)) { // Copy must exist locally.
+            //~ if (!strncasecmp(entry->d_name, "New_", 4)) { // Copy must exist locally, delete it after.
                 //~ PI_ERR piErr;
                 //~ char toDelete[NAME_MAX];
                 //~ strcat(strcat(strcpy(toDelete ,ROOTDIRS[d]), "/"), entry->d_name);
@@ -795,9 +783,9 @@ PI_ERR syncVolume(const int sd, int volRef) {
                 //~ }
             struct stat fstat;
             int statErr;
-            char lcAlbumDir[NAME_MAX];
-            if ((statErr = stat(strcat(strcat(strcpy(lcAlbumDir, lcRoot), "/"), entry->d_name), &fstat))) {
-                jp_logf(L_FATAL, "%s:    ERROR: %d; Could not read status of %s; No sync possible!\n", MYNAME, statErr, lcAlbumDir);
+            char lcAlbum[NAME_MAX];
+            if ((statErr = stat(strcat(strcat(strcpy(lcAlbum, lcRoot), "/"), entry->d_name), &fstat))) {
+                jp_logf(L_FATAL, "%s:    ERROR: %d; Could not read status of %s; No sync possible!\n", MYNAME, statErr, lcAlbum);
                 result = MIN(result, -2);
                 continue;
             }
@@ -809,12 +797,11 @@ PI_ERR syncVolume(const int sd, int volRef) {
                 continue;
             }
             jp_logf(L_DEBUG, "%s:    Found real local album '%s' in '%s'\n", MYNAME, entry->d_name, lcRoot + strlen(lcPath) + 1);
-            PI_ERR albumResult = syncAlbum(sd, volRef, 0, ROOTDIRS[d], lcRootP, lcRoot, entry->d_name);
+            PI_ERR albumResult = syncAlbum(sd, volRef, 0, ROOTDIRS[d], dirP, lcRoot, entry->d_name);
             result = MIN(result, albumResult);
-            // ToDo: Print log if Error !
         }
 
-        closedir(lcRootP);
+        closedir(dirP);
 Continue2:
         free(lcRoot);
 Continue1:
@@ -851,10 +838,8 @@ int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs) {
     //    4 : At least one volume found, but maybe additional hidden volume 1 exists
     piErr = dlp_VFSVolumeEnumerate(sd, numVols, volRefs);
     jp_logf(L_DEBUG, "%s: dlp_VFSVolumeEnumerate piErr code %d, found %d volumes\n", MYNAME, piErr, *numVols);
-    // On the Centro, Treo 650 and maybe more, it appears that the
-    // first non-hidden volRef is 2, and the hidden volRef is 1.
-    // Let's poke around to see, if there is really a volRef 1
-    // that's hidden from the dlp_VFSVolumeEnumerate().
+    // On the Centro, Treo 650 and maybe more, it appears that the first non-hidden volRef is 2, and the hidden volRef is 1.
+    // Let's poke around to see, if there is really a volRef 1 that's hidden from the dlp_VFSVolumeEnumerate().
     if (piErr < 0)  *numVols = 0; // On Error reset numVols
     for (int i=0; i<*numVols; i++) { // Search for volume 1
         jp_logf(L_DEBUG, "%s: *numVols=%d, volRefs[%d]=%d\n", MYNAME, *numVols, i, volRefs[i]);
