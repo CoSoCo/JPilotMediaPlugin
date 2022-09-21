@@ -311,6 +311,57 @@ Exit:
     return NULL;
 }
 
+int enumerateOpenDir(const int sd, const int volRef, FileRef dirRef, const char *rmDir, VFSDirInfo dirInfos[]) {
+    int dirItems_init = MIN_DIR_ITEMS, dirItems;
+    PI_ERR piErr;
+
+    // Iterate over all the files in the remote dir.
+    //~ enum dlpVFSFileIteratorConstants itr = vfsIteratorStart; // doesn't work because of type mismatch bug <https://github.com/juddmon/jpilot/issues/39>
+    //~ while (itr != (unsigned long)vfsIteratorStop) { // doesn't work because of bug <https://github.com/juddmon/jpilot/issues/39>
+    //~ while (itr != (unsigned)vfsIteratorStop) { // doesn't work because of bug <https://github.com/juddmon/jpilot/issues/41>
+    unsigned long itr = (unsigned long)vfsIteratorStart;
+    int loops = 16; // for debugging
+    for (; (dirItems = dirItems_init) <= MAX_DIR_ITEMS && dirItems > 0; dirItems_init *= 2) { // WORKAROUND
+        if (--loops < 0)  break; // for debugging
+        //~ jp_logf(L_DEBUG, "%s:      Enumerate remote dir '%s', dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, rmDir, dirRef, itr, dirItems);
+        if ((piErr = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &dirItems, dirInfos)) < 0) {
+            // Crashes on empty directory (see: <https://github.com/desrod/pilot-link/issues/11>):
+            // Further research is neccessary (see: <https://github.com/juddmon/jpilot/issues/41>):
+            // - Why in case of i.e. setting dirItems=4, itr != 0, even if there are more than 4 files?
+            // - Why then on SDCard itr == 1888 in the first loop, so out of allowed range?
+            jp_logf(L_FATAL, "%s:      Enumerate ERROR: %4d; rmDir=%s, dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, piErr, rmDir, dirRef, itr, dirItems);
+            if (piErr == PI_ERR_DLP_PALMOS)
+                jp_logf(L_FATAL, "%s:      ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
+            return piErr;
+        }
+        //~ jp_logf(L_DEBUG, "%s:      Enumerate OK: piErr=%4d, dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, piErr, dirRef, itr, dirItems);
+        //~ for (int i = dirItems_init==MIN_DIR_ITEMS ? 0 : dirItems_init/2; i < dirItems; i++) {
+            //~ jp_logf(L_DEBUG, "%s:       dirItem %3d: '%s' attributes %x\n", MYNAME, i, dirInfos[i].name, dirInfos[i].attr);
+        //~ }
+        if (dirItems < dirItems_init)
+            break;
+        itr = (unsigned long)vfsIteratorStart; // workaround, reset itr for next loop, if it wrongly was -1 or 1888
+    }
+    if (dirItems >= MAX_DIR_ITEMS)
+        jp_logf(L_FATAL, "%s:      Enumerate OVERFLOW: There seem to be more than %d dir items in '%s'!\n", MYNAME, MAX_DIR_ITEMS, rmDir);
+    return dirItems;
+}
+
+int enumerateDir(const int sd, const int volRef, const char *rmDir, VFSDirInfo dirInfos[]) {
+    FileRef dirRef;
+    PI_ERR piErr;
+    if ((piErr = dlp_VFSFileOpen(sd, volRef, rmDir, vfsModeRead, &dirRef)) < 0) {
+        jp_logf(L_FATAL, "%s:       ERROR: %d; Could not open dir '%s' on volume %d\n", MYNAME, piErr, rmDir, volRef);
+        if (piErr == PI_ERR_DLP_PALMOS)
+            jp_logf(L_FATAL, "%s:      ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
+        return piErr;
+    } else {
+        int dirItems = enumerateOpenDir(sd, volRef, dirRef, rmDir, dirInfos);
+        dlp_VFSFileClose(sd, dirRef);
+        return dirItems;
+    }
+}
+
 int cmpExcludeDirList(const char *dname) {
     int result = 1;
     for (excludeDir *tmp = excludeDirList; dname && tmp; tmp = tmp->next) {
@@ -326,38 +377,22 @@ char *isoTime(const time_t *time) {
 }
 
 /* List root directories for developing purposes. */
-PI_ERR listRemoteFiles(const int sd, const int volRef, const char *dir, const int depth) {
-    FileRef dirRef, fileRef;
+PI_ERR listRemoteFiles(const int sd, const int volRef, const char *rmDir, const int depth) {
+    FileRef fileRef;
     VFSDirInfo dirInfos[MAX_DIR_ITEMS];
     char prefix[] = MYNAME":                 ";
-    PI_ERR result = 0;
-
     prefix[MIN(sizeof(prefix) - 1, strlen(MYNAME) + 2 + depth)] = '\0';
-    if (dlp_VFSFileOpen(sd, volRef, dir, vfsModeRead, &dirRef) < 0) {
-        jp_logf(L_WARN, "%sWARNING: Dir '%s' does not exist on volume %d\n", prefix, dir, volRef);
-        goto Skip;
-    }
-    if (!cmpExcludeDirList(dir))  goto Exit; // avoid bug <https://github.com/desrod/pilot-link/issues/11>
-    // Iterate through the volume root.
-    int dirItems = MAX_DIR_ITEMS;
-    unsigned long itr = (unsigned long)vfsIteratorStart;
-    PI_ERR enRes;
-    //~ jp_logf(L_DEBUG, "%sEnumerate dir '%s', dirRef=%8lx, itr=%4lx, dirItems=%d\n", prefix, dir, dirRef, itr, dirItems);
-    if ((enRes = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &dirItems, dirInfos)) < 0) {
-        jp_logf(L_FATAL, "%sEnumerate ERROR: enRes=%4d, dirRef=%8lx, itr=%4lx, dirItems=%d\n", prefix, enRes, dirRef, itr, dirItems);
-        result = -3;
-        goto Exit;
-    } else {
-        //~ jp_logf(L_DEBUG, "%sEnumerate OK: enRes=%4d, dirRef=%8lx, itr=%4lx, dirItems=%d\n", prefix, enRes, dirRef, itr, dirItems);
-    }
-    jp_logf(L_DEBUG, "%s%d remote files in '%s' on Volume %d ...\n", prefix, dirItems, dir, volRef);
+
+    if (!cmpExcludeDirList(rmDir))  return -1; // avoid bug <https://github.com/desrod/pilot-link/issues/11>
+    int dirItems = enumerateDir(sd, volRef, rmDir, dirInfos);
+    jp_logf(L_DEBUG, "%s%d remote files in '%s' on Volume %d ...\n", prefix, dirItems, rmDir, volRef);
     for (int i = 0; i < dirItems; i++) {
         char child[NAME_MAX];
         int filesize = 0;
         //~ time_t dateCre = 0, dateMod = 0;
         time_t dateCre = 0;
 
-        strncat(strncat(strcpy(child, strcmp(dir, "/") ? dir : ""), "/", NAME_MAX-1), dirInfos[i].name, NAME_MAX-1);
+        strncat(strncat(strcpy(child, strcmp(rmDir, "/") ? rmDir : ""), "/", NAME_MAX-1), dirInfos[i].name, NAME_MAX-1);
         if (dlp_VFSFileOpen(sd, volRef, child, vfsModeRead, &fileRef) < 0) {
             jp_logf(L_WARN, "%sWARNING: Could not open '%s' on volume %d\n", prefix, child, volRef);
         } else {
@@ -375,11 +410,8 @@ PI_ERR listRemoteFiles(const int sd, const int volRef, const char *dir, const in
             listRemoteFiles(sd, volRef, child, depth + 1);
         }
     }
-Exit:
-    dlp_VFSFileClose(sd, dirRef);
-Skip:
-    //~ jp_logf(L_DEBUG, "%sList remote files in '%s' on volume %d done -> result=%d\n", prefix, dir, volRef, result);
-    return result;
+    //~ jp_logf(L_DEBUG, "%sList remote files in '%s' on volume %d done -> dirItems=%d\n", prefix, rmDir, volRef, dirItems);
+    return (PI_ERR)dirItems;
 }
 
 int fileRead(const int sd, FileRef fileRef, FILE *fileP, pi_buffer_t *buf, int remaining) {
@@ -660,8 +692,8 @@ int cmpRemote(VFSDirInfo dirInfos[], int dirItems, const char *fname) {
 PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR *dirP, const char *lcRoot, const char *name) {
     char rmTmp[name ? strlen(rmRoot) + strlen(name) + 2 : 0], *rmAlbum;
     char lcTmp[name ? strlen(lcRoot) + strlen(name) + 2 : 0], *lcAlbum;
-    int dirItems_init = MIN_DIR_ITEMS;
     VFSDirInfo dirInfos[MAX_DIR_ITEMS];
+    int dirItems = 0;
     struct stat fstat;
     int statErr;
     PI_ERR result = 0, piOSErr;
@@ -678,7 +710,7 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
                 }
             }
             importantWarning = 1;
-            dirItems_init = 0; // prevent search on remote album
+            dirItems = -1; // prevent search on remote album
         }
         jp_logf(L_DEBUG, "%s:    Try to open dir '%s' on volume %d\n", MYNAME, rmAlbum, volRef);
         if (dlp_VFSFileOpen(sd, volRef, rmAlbum, vfsModeReadWrite, &dirRef) < 0) { // mode "Write" for setting date later
@@ -717,33 +749,8 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
         lcAlbum = (char *)lcRoot;
     }
     jp_logf(L_GUI, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, name ? name : ".", rmRoot, volRef);
-    // Iterate over all the files in the remote album dir.
-    int dirItems;
-    //~ enum dlpVFSFileIteratorConstants itr = vfsIteratorStart; // doesn't work because of type mismatch bug <https://github.com/juddmon/jpilot/issues/39>
-    //~ while (itr != (unsigned long)vfsIteratorStop) { // doesn't work because of bug <https://github.com/juddmon/jpilot/issues/39>
-    //~ while (itr != (unsigned)vfsIteratorStop) { // doesn't work because of bug <https://github.com/juddmon/jpilot/issues/41>
-    unsigned long itr = (unsigned long)vfsIteratorStart;
-    int loops = 16; // for debugging
-    for (; (dirItems = dirItems_init) <= MAX_DIR_ITEMS && dirItems > 0; dirItems_init *= 2) { // WORKAROUND
-        if (--loops < 0)  break; // for debugging
-        itr = (unsigned long)vfsIteratorStart; // workaround, reset itr if it wrongly was -1 or 1888
-        jp_logf(L_DEBUG, "%s:     Enumerate album '%s', dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, rmAlbum, dirRef, itr, dirItems);
-        if ((result = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &dirItems, dirInfos)) < 0) {
-            // Crashes on empty directory (see: <https://github.com/desrod/pilot-link/issues/11>):
-            // Further research is neccessary (see: <https://github.com/juddmon/jpilot/issues/41>):
-            // - Why in case of i.e. setting dirItems=4, itr != 0, even if there are more than 4 files?
-            // - Why then on SDCard itr == 1888 in the first loop, so out of allowed range?
-            jp_logf(L_FATAL, "%s:     Enumerate ERROR: result=%4d, dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, result, dirRef, itr, dirItems);
-            goto Exit2;
-        }
-        jp_logf(L_DEBUG, "%s:     Enumerate OK: result=%4d, dirRef=%8lx, itr=%4lx, dirItems=%d\n", MYNAME, result, dirRef, itr, dirItems);
-        for (int i= dirItems_init==MIN_DIR_ITEMS ? 0 : dirItems_init/2; i<dirItems; i++) {
-            jp_logf(L_DEBUG, "%s:      dirItem %3d: '%s' attributes %x\n", MYNAME, i, dirInfos[i].name, dirInfos[i].attr);
-        }
-        if (dirItems < dirItems_init) {
-            break;
-        }
-    }
+    if (!dirItems) // We are in backup mode !
+        dirItems = enumerateOpenDir(sd, volRef, dirRef, rmAlbum, dirInfos);
     jp_logf(L_DEBUG, "%s:     Now first search of local files, which to restore ...\n", MYNAME);
     // First iterate over all the local files in the album dir, to prevent from back-storing renamed files,
     // so only looking for remotely unknown files ... and then restore them.
@@ -800,7 +807,6 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
         int backupResult = backupFileIfNeeded(sd, volRef, rmAlbum, lcAlbum, fname);
         result = MIN(result, backupResult);
     }
-Exit2:
     if (name)  closedir(dirP);
     else  rewinddir(dirP);
 Exit1:
