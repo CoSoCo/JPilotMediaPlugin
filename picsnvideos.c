@@ -36,7 +36,7 @@
 #include "libplugin.h"
 //#include "i18n.h"
 
-#define MYNAME "Pics&Videos"
+#define MYNAME PACKAGE_NAME
 #define PCDIR "Media"
 
 #define L_DEBUG JP_LOG_DEBUG
@@ -48,6 +48,7 @@
 typedef struct VFSInfo VFSInfo;
 typedef struct VFSDirInfo VFSDirInfo;
 typedef struct fileType {char ext[16]; struct fileType *next;} fileType;
+typedef struct excludeDir {char dir[NAME_MAX]; struct excludeDir *next;} excludeDir;
 
 static const char HELP_TEXT[] =
 "JPilot plugin (c) 2008 by Dan Bodoh\n\
@@ -70,11 +71,13 @@ static prefType prefs[] = {
     // video (CDMA phones)
     // audio caption (GSM phones)
     // audio caption (CDMA phones)
-    {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.3gp.3g2.avi.amr.qcp" , 256},
+    {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.amr.qcp.3gp.3g2.avi" , 256},
     {"useDateModified", INTTYPE, INTTYPE, 0, NULL, 0},
     {"compareContent", INTTYPE, INTTYPE, 0, NULL, 0},
     {"doBackup", INTTYPE, INTTYPE, 1, NULL, 0},
-    {"doRestore", INTTYPE, INTTYPE, 1, NULL, 0}
+    {"doRestore", INTTYPE, INTTYPE, 1, NULL, 0},
+    {"listFiles", INTTYPE, INTTYPE, 0, NULL, 0},
+    {"excludeDirs", CHARTYPE, CHARTYPE, 0, "/BLAZER", 0}
 };
 static const unsigned NUM_PREFS = sizeof(prefs)/sizeof(prefType);
 static long syncThumbnailDir;
@@ -83,6 +86,8 @@ static long useDateModified;
 static long compareContent;
 static long doBackup;
 static long doRestore;
+static long listFiles;
+static char *excludeDirs; // becomes freed by jp_free_prefs()
 
 static const unsigned MAX_VOLUMES = 16;
 static const unsigned MIN_DIR_ITEMS = 2;
@@ -90,15 +95,17 @@ static const unsigned MAX_DIR_ITEMS = 1024;
 static const char *ROOTDIRS[] = {"Photos & Videos", "Fotos & Videos", "DCIM"};
 static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"};
 static fileType *fileTypeList = NULL;
+static excludeDir *excludeDirList = NULL;
 static char lcPath[NAME_MAX];
 static pi_buffer_t *piBuf, *piBuf2;
 static int importantWarning = 0;
 static char syncLogEntry[128];
 
 
-void *mallocLog(size_t);
-int volumeEnumerateIncludeHidden(const int, int *, int *);
-int syncVolume(const int, int);
+static void *mallocLog(size_t size);
+int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs);
+int syncVolume(const int sd, int volRef);
+PI_ERR listRemoteFiles(const int sd, int volRef, const char *dir, const int indent);
 
 void plugin_version(int *major_version, int *minor_version) {
     *major_version = 0;
@@ -107,7 +114,7 @@ void plugin_version(int *major_version, int *minor_version) {
 
 int plugin_get_name(char *name, int len) {
     //~ snprintf(name, len, "%s %d.%d", MYNAME, PLUGIN_MAJOR, PLUGIN_MINOR);
-    snprintf(name, len, "%s %s", MYNAME, VERSION);
+    strncpy(name, PACKAGE_STRING, len);
     return EXIT_SUCCESS;
 }
 
@@ -135,21 +142,17 @@ int plugin_startup(jp_startup_info *info) {
     jp_pref_init(prefs, NUM_PREFS);
     if (jp_pref_read_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0)
         jp_logf(L_WARN, "%s: WARNING: Could not read prefs[] from '%s'\n", MYNAME, PREFS_FILE);
-    if (jp_get_pref(prefs, 0, &syncThumbnailDir, NULL) < 0)
-        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[0].name);
-    if (jp_get_pref(prefs, 1, NULL, (const char **)&fileTypes) < 0)
-        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[1].name);
-    if (jp_get_pref(prefs, 2, &useDateModified, NULL) < 0)
-        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[2].name);
-    if (jp_get_pref(prefs, 3, &compareContent, NULL) < 0)
-        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[3].name);
-    if (jp_get_pref(prefs, 4, &doBackup, NULL) < 0)
-        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[4].name);
-    if (jp_get_pref(prefs, 5, &doRestore, NULL) < 0)
-        jp_logf(L_WARN, "%s: WARNING: Could not read pref '%s' from prefs[]\n", MYNAME, prefs[5].name);
     if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // To initialize with defaults, if pref file wasn't existent.
         jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE);
-    for (char *last; (last = strrchr(fileTypes, '.')) >= fileTypes; *last = 0) {
+    jp_get_pref(prefs, 0, &syncThumbnailDir, NULL);
+    jp_get_pref(prefs, 1, NULL, (const char **)&fileTypes);
+    jp_get_pref(prefs, 2, &useDateModified, NULL);
+    jp_get_pref(prefs, 3, &compareContent, NULL);
+    jp_get_pref(prefs, 4, &doBackup, NULL);
+    jp_get_pref(prefs, 5, &doRestore, NULL);
+    jp_get_pref(prefs, 6, &listFiles, NULL);
+    jp_get_pref(prefs, 7, NULL, (const char **)&excludeDirs);
+    for (char *last; !result && (last = strrchr(fileTypes, '.')) >= fileTypes; *last = '\0') {
         fileType *ftype;
         if (strlen(last) < sizeof(ftype->ext) && (ftype = mallocLog(sizeof(*ftype)))) {
             strcpy(ftype->ext, last);
@@ -160,6 +163,21 @@ int plugin_startup(jp_startup_info *info) {
             result = EXIT_FAILURE;
             break;
         }
+    }
+    for (char *last; !result && strlen(excludeDirs) > 0; *last = '\0') {
+        last = (last = strrchr(excludeDirs, ' ')) ? last + 1 : excludeDirs;
+        jp_logf(L_WARN, "%s: WARNING: Exclude dir '%s'\n", MYNAME, last);
+        excludeDir *exDir;
+        if (strlen(last) < sizeof(exDir->dir) && (exDir = mallocLog(sizeof(*exDir)))) {
+            strcpy(exDir->dir, last);
+            exDir->next = excludeDirList;
+            excludeDirList = exDir;
+        } else {
+            plugin_exit_cleanup();
+            result = EXIT_FAILURE;
+            break;
+        }
+        if (last > excludeDirs)  last--;
     }
     jp_free_prefs(prefs, NUM_PREFS);
     if (!result && (result = !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))))
@@ -195,6 +213,11 @@ int plugin_sync(int sd) {
     // Scan all the volumes for media and backup them.
     int result = EXIT_FAILURE;
     for (int i=0; i<volumes; i++) {
+        if (listFiles) { // List all files from the Palm device, but don't sync.
+            if (listRemoteFiles(sd, volRefs[i], "/", 1) >= 0)
+                result = EXIT_SUCCESS;
+            continue;
+        }
         PI_ERR volResult;
         if ((volResult = syncVolume(sd, volRefs[i])) < -2) {
             snprintf(syncLogEntry, sizeof(syncLogEntry),
@@ -215,9 +238,9 @@ Continue:
     if (result != EXIT_SUCCESS)
         dlp_AddSyncLogEntry (sd, "Synchronization of Media was incomplete.\n");
     if (importantWarning) {
-        jp_logf(L_WARN, "\n%s: IMPORTANT WARNING: Now open once the Media App on your Palm device to avoid crash (signal SIGCHLD) on next HotSync !!!\n\n", MYNAME);
-        dlp_AddSyncLogEntry (sd, MYNAME": IMPORTANT WARNING: Now open once the Media App to avoid crash with JPilot on next HotSync !!!\n");
-        // Avoids bug <https://github.com/desrod/pilot-link/issues/10>, as then the file "Album.db" is created, so the dir is not empty anymore.
+        jp_logf(L_WARN, "\n%s: IMPORTANT WARNING: Now open once the Media app on your Palm device to avoid crash (signal SIGCHLD) on next HotSync !!!\n\n", MYNAME);
+        dlp_AddSyncLogEntry (sd, MYNAME": IMPORTANT WARNING: Now open once the Media app to avoid crash with JPilot on next HotSync !!!\n");
+        // Avoids bug <https://github.com/desrod/pilot-link/issues/11>, as then the file "Album.db" is created, so the dir is not empty anymore.
     }
 
     return result;
@@ -226,16 +249,21 @@ Continue:
 int plugin_exit_cleanup(void) {
     pi_buffer_free(piBuf);
     pi_buffer_free(piBuf2);
-    for (fileType *tmp; (tmp = fileTypeList);) {
+    for (fileType *item; (item = fileTypeList);) {
         fileTypeList = fileTypeList->next;
-        free(tmp);
+        free(item);
+    }
+    for (excludeDir *item; (item = excludeDirList);) {
+        excludeDirList = excludeDirList->next;
+        free(item);
     }
     return EXIT_SUCCESS;
 }
 
 // ToDo: Rename picsnvideos ./. media
 
-void *mallocLog(size_t size) {
+/* Log OOM error on malloc(). */
+static void *mallocLog(size_t size) {
     void *p;
     if (!(p = malloc(size)))
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
@@ -281,6 +309,77 @@ char *localRoot(const int sd, const unsigned volRef) {
 Exit:
     free(path);
     return NULL;
+}
+
+int cmpExcludeDirList(const char *dname) {
+    int result = 1;
+    for (excludeDir *tmp = excludeDirList; dname && tmp; tmp = tmp->next) {
+        if (!(result = strcmp(dname, tmp->dir)))  break;
+    }
+    return result;
+}
+
+char *isoTime(const time_t *time) {
+    static char isoTime[20];
+    strftime(isoTime, 20, "%F %T", localtime (time));
+    return isoTime;
+}
+
+/* List root directories for developing purposes. */
+PI_ERR listRemoteFiles(const int sd, const int volRef, const char *dir, const int depth) {
+    FileRef dirRef, fileRef;
+    VFSDirInfo dirInfos[MAX_DIR_ITEMS];
+    char prefix[] = MYNAME":                 ";
+    PI_ERR result = 0;
+
+    prefix[MIN(sizeof(prefix) - 1, strlen(MYNAME) + 2 + depth)] = '\0';
+    if (dlp_VFSFileOpen(sd, volRef, dir, vfsModeRead, &dirRef) < 0) {
+        jp_logf(L_WARN, "%sWARNING: Dir '%s' does not exist on volume %d\n", prefix, dir, volRef);
+        goto Skip;
+    }
+    if (!cmpExcludeDirList(dir))  goto Exit; // avoid bug <https://github.com/desrod/pilot-link/issues/11>
+    // Iterate through the volume root.
+    int dirItems = MAX_DIR_ITEMS;
+    unsigned long itr = (unsigned long)vfsIteratorStart;
+    PI_ERR enRes;
+    //~ jp_logf(L_DEBUG, "%sEnumerate dir '%s', dirRef=%8lx, itr=%4lx, dirItems=%d\n", prefix, dir, dirRef, itr, dirItems);
+    if ((enRes = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &dirItems, dirInfos)) < 0) {
+        jp_logf(L_FATAL, "%sEnumerate ERROR: enRes=%4d, dirRef=%8lx, itr=%4lx, dirItems=%d\n", prefix, enRes, dirRef, itr, dirItems);
+        result = -3;
+        goto Exit;
+    } else {
+        //~ jp_logf(L_DEBUG, "%sEnumerate OK: enRes=%4d, dirRef=%8lx, itr=%4lx, dirItems=%d\n", prefix, enRes, dirRef, itr, dirItems);
+    }
+    jp_logf(L_DEBUG, "%s%d remote files in '%s' on Volume %d ...\n", prefix, dirItems, dir, volRef);
+    for (int i = 0; i < dirItems; i++) {
+        char child[NAME_MAX];
+        int filesize = 0;
+        //~ time_t dateCre = 0, dateMod = 0;
+        time_t dateCre = 0;
+
+        strncat(strncat(strcpy(child, strcmp(dir, "/") ? dir : ""), "/", NAME_MAX-1), dirInfos[i].name, NAME_MAX-1);
+        if (dlp_VFSFileOpen(sd, volRef, child, vfsModeRead, &fileRef) < 0) {
+            jp_logf(L_WARN, "%sWARNING: Could not open '%s' on volume %d\n", prefix, child, volRef);
+        } else {
+            if (!(dirInfos[i].attr & vfsFileAttrDirectory) && (dlp_VFSFileSize(sd, fileRef, &filesize) < 0))
+                jp_logf(L_WARN, "%sWARNING: Could not get size of '%s' on volume %d\n", prefix, child, volRef);
+            if (dlp_VFSFileGetDate(sd, fileRef, vfsFileDateCreated, &dateCre) < 0)
+                jp_logf(L_WARN, "%s:WARNING: Could not get date created of file '%s' on volume %d\n", prefix, child, volRef);
+            //~ if (dlp_VFSFileGetDate(sd, fileRef, vfsFileDateModified, &dateMod) < 0) // seems to be ignored by Palm
+                //~ jp_logf(L_WARN, "%s:WARNING: Could not get date modified of file '%s' on volume %d\n", prefix, child, volRef);
+            dlp_VFSFileClose(sd, fileRef);
+        }
+        //~ jp_logf(L_DEBUG, "%s 0x%02x%10d %s %s %s\n", prefix, dirInfos[i].attr, filesize, isoTime(&dateCre), isoTime(&dateMod), dirInfos[i].name);
+        jp_logf(L_DEBUG, "%s 0x%02x%10d %s %s\n", prefix, dirInfos[i].attr, filesize, isoTime(&dateCre), dirInfos[i].name);
+        if (dirInfos[i].attr & vfsFileAttrDirectory && depth < listFiles) {
+            listRemoteFiles(sd, volRef, child, depth + 1);
+        }
+    }
+Exit:
+    dlp_VFSFileClose(sd, dirRef);
+Skip:
+    //~ jp_logf(L_DEBUG, "%sList remote files in '%s' on volume %d done -> result=%d\n", prefix, dir, volRef, result);
+    return result;
 }
 
 int fileRead(const int sd, FileRef fileRef, FILE *fileP, pi_buffer_t *buf, int remaining) {
@@ -470,7 +569,8 @@ int restoreFile(const int sd, const unsigned volRef, const char *lcDir, const ch
         jp_logf(L_FATAL, "%s:       ERROR: Could not open %s for reading %d bytes,\n", MYNAME, lcPath, filesize);
         return -1;
     }
-    if ((piErr = dlp_VFSFileOpen(sd, volRef, rmPath, vfsModeReadWrite | vfsModeCreate, &fileRef)) < 0) { // May not work on DLP, then first create file with:
+    if ((piErr = dlp_VFSFileOpen(sd, volRef, rmPath, vfsModeReadWrite | vfsModeCreate, &fileRef)) < 0) { // May not work on DLP,
+    //~ // ... then first create file with:
     //~ if ((piErr = dlp_VFSFileCreate(sd, volRef, rmPath)) < 0) {
         //~ jp_logf(L_FATAL, "%s:       ERROR: %d; Could not create remote file '%s' on volume %d.\n", MYNAME, piErr, rmPath, volRef);
         //~ if (piErr == PI_ERR_DLP_PALMOS)
@@ -511,9 +611,20 @@ int restoreFile(const int sd, const unsigned volRef, const char *lcDir, const ch
         jp_logf(L_GUI, " OK\n");
         time_t date = fstat.st_mtime;
         // Set both dates of the file (DateCreated is displayed in Media App on Palm device); must not be before 1980, otherwise PalmOS error.
-        if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateModified, date)) < 0 ||
-                (piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date)) < 0) {
-            jp_logf(L_WARN, "%s:      WARNING: %d Could not set date of remote file '%s' on volume %d\n", MYNAME, piErr, rmPath, volRef);
+        //~ if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date + 31557384)) < 0 ||
+        //~ if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date)) < 0 ||
+                //~ (piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateModified, date)) < 0) {
+            //~ jp_logf(L_WARN, "%s:      WARNING: %d Could not set date of remote file '%s' on volume %d\n", MYNAME, piErr, rmPath, volRef);
+            //~ if (piErr == PI_ERR_DLP_PALMOS)
+                //~ jp_logf(L_FATAL, "%s:      ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
+        //~ }
+        if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date)) < 0) {
+            jp_logf(L_WARN, "%s:      WARNING: %d Could not set created date of remote file '%s' on volume %d\n", MYNAME, piErr, rmPath, volRef);
+            if (piErr == PI_ERR_DLP_PALMOS)
+                jp_logf(L_FATAL, "%s:      ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
+        }
+        if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateModified, date)) < 0) { // but modified date seems to be ignored
+            jp_logf(L_WARN, "%s:      WARNING: %d Could not set modified date of remote file '%s' on volume %d\n", MYNAME, piErr, rmPath, volRef);
             if (piErr == PI_ERR_DLP_PALMOS)
                 jp_logf(L_FATAL, "%s:      ERROR: PalmOS error: %d.\n", MYNAME, pi_palmos_error(sd));
         }
@@ -641,7 +752,7 @@ PI_ERR syncAlbum(const int sd, const unsigned volRef, FileRef dirRef, const char
         //~ // Intentionally remove the remote file for debugging purpose:
         //~ if (!strncasecmp(entry->d_name, "New_", 4)) { // Copy must exist locally, delete it after.
         //~ if (!strncasecmp(entry->d_name, "Thumb_", 6)) { // Copy must exist locally, delete it after.
-        //~ if (!strcasecmp(entry->d_name, "New_BILD2255.JPG")) { // Copy must exist locally, delete it after.
+        //~ if (!strcasecmp(entry->d_name, "Thumb_3746557696.thb")) { // Copy must exist locally, delete it after.
             //~ PI_ERR piErr;
             //~ char toDelete[NAME_MAX];
             //~ strcat(strcat(strcpy(toDelete ,rmAlbum), "/"), entry->d_name);
@@ -738,7 +849,7 @@ PI_ERR syncVolume(const int sd, int volRef) {
         //~ while (itr != vfsIteratorStop) { // doesn't work because of type mismatch bug <https://github.com/juddmon/jpilot/issues/39>
         unsigned long itr = (unsigned long)vfsIteratorStart;
         for (int batch; (enum dlpVFSFileIteratorConstants)itr != vfsIteratorStop; dirItems += batch) {
-            batch = MIN(512, MAX_DIR_ITEMS - dirItems);
+            batch = MIN(MAX_DIR_ITEMS / 2, MAX_DIR_ITEMS - dirItems);
             jp_logf(L_DEBUG, "%s:   Enumerate root '%s', dirRef=%8lx, itr=%4lx, batch=%d, dirItems=%d\n", MYNAME, ROOTDIRS[d], dirRef, itr, batch, dirItems);
             PI_ERR enRes;
             if ((enRes = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &batch, dirInfos + dirItems)) < 0) {

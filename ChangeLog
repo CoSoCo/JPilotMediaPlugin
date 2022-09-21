@@ -1,3 +1,7 @@
+Version 0.4.3   Sept 21, 2022
+Ulf Zibis <Ulf.Zibis@CoSoCo.de>
+* Added listRemoteFiles() with pref listFiles.
+
 Version 0.4.2   Sept 15, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Added .avi to the default types.

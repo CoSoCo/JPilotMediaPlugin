@@ -10,12 +10,12 @@ https://github.com/danbodoh/picsnvideos-jpilot
 This plugin fetches, rather than syncs.  The plugin reads pictures and
 videos taken with the camera on the Palm, and stores them on the computer.
 It will also fetch audio captions added with the 'Pics&Videos'
-application (known as 'Media' on older Palms). Files are never deleted
+application (known as 'Media' on older Palms).  Files are never deleted
 from the Palm or from the computer.
 
 Files from the internal memory of the Palm are stored in
-'$HOME/PalmPictures/Device'.  Files from the Palm's SD Card are stored in
-'$HOME/PalmPictures/SDCard'.
+'$JPILOT_HOME/.jpilot/Media/Device/'.  Files from the Palm's SD Card are stored in
+'$JPILOT_HOME/.jpilot/Media/SDCard/'.
 
 Each album on the Palm is a directory under 'Device/' or 'SDCard/'.
 Some older Palms will create an 'Unfiled/' directory for pictures and
@@ -36,7 +36,7 @@ photo_051608_001.jpg.amr (or .qcp).
 Once a picture or video has been fetched, it will never be fetched
 again even if it moved to a different album.  Re-recorded audio captions
 will be refetched.  To force all pictures to be re-fetched, delete
-the file $HOME/.jpilot/picsnvideos-fetched.gdbm.
+the files $JPILOT_HOME/.jpilot/Media/.
 
 Problems or suggestions can be reported in the forums or tracker at
 https://github.com/danbodoh/picsnvideos-jpilot.  it is helpful to include
