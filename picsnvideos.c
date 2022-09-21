@@ -288,29 +288,25 @@ int createDir(char *path, const char *dir) {
  * Null is returned if out of memory.
  * Caller should free return value.
  */
-char *localRoot(const unsigned volRef) {
-    char *path = mallocLog(NAME_MAX);
+static char *localRoot(const unsigned volRef) {
+    static char path[NAME_MAX];
     VFSInfo volInfo;
 
-    if (!path)  return path;
-    if (createDir(strcpy(path, lcPath), NULL))  goto Exit;
+    if (createDir(strcpy(path, lcPath), NULL))  return NULL;
     // Get indicator of which card.
     if (dlp_VFSVolumeInfo(sd, volRef, &volInfo) < 0) {
         jp_logf(L_FATAL, "%s:     ERROR: Could not get volume info from volRef %d\n", MYNAME, volRef);
-        goto Exit;
+        return NULL;
     }
     if (volInfo.mediaType == pi_mktag('T', 'F', 'F', 'S')) {
-        if (createDir(path, LOCALDIRS[0]))  goto Exit;
+        if (createDir(path, LOCALDIRS[0]))  return NULL;
     } else if (volInfo.mediaType == pi_mktag('s', 'd', 'i', 'g')) {
-        if (createDir(path, LOCALDIRS[1]))  goto Exit;
+        if (createDir(path, LOCALDIRS[1]))  return NULL;
     } else {
         sprintf(path+strlen(path), "/%s%d", LOCALDIRS[2], volInfo.slotRefNum);
-        if (createDir(path, NULL))  goto Exit;
+        if (createDir(path, NULL))  return NULL;
     }
-    return path; // must be free'd by caller
-Exit:
-    free(path);
-    return NULL;
+    return path; // must not be free'd by caller
 }
 
 int enumerateOpenDir(const int volRef, FileRef dirRef, const char *rmDir, VFSDirInfo dirInfos[]) {
@@ -839,11 +835,11 @@ PI_ERR syncVolume(int volRef) {
         // Open the local root directory.
         char *lcRoot;
         if (!(lcRoot = localRoot(volRef)))
-            goto Continue1;
+            goto Continue;
         DIR *dirP;
         if (!(dirP = opendir(lcRoot))) {
             jp_logf(L_DEBUG, "%s:   Root '%s' does not exist on '%s'\n", MYNAME, lcRoot + strlen(lcPath) + 1, lcPath);
-            goto Continue2;
+            goto Continue;
         }
         jp_logf(L_DEBUG, "%s:   Opened local root '%s' on '%s'\n", MYNAME, lcRoot + strlen(lcPath) + 1, lcPath);
 
@@ -921,9 +917,7 @@ PI_ERR syncVolume(int volRef) {
         }
 
         closedir(dirP);
-Continue2:
-        free(lcRoot);
-Continue1:
+Continue:
         dlp_VFSFileClose(sd, dirRef);
     }
     jp_logf(L_DEBUG, "%s:  Volume %d done -> rootResult=%d, result=%d\n", MYNAME,  volRef, rootResult, result);
