@@ -154,6 +154,8 @@ int plugin_startup(jp_startup_info *info) {
     jp_get_pref(prefs, 6, &listFiles, NULL);
     jp_get_pref(prefs, 7, NULL, (const char **)&excludeDirs);
     for (char *last; !result && (last = strrchr(fileTypes, '.')) >= fileTypes; *last = '\0') {
+        if (last > fileTypes && *(last - 1) == '.') // found ".." separator
+            last--;
         fileType *ftype;
         if (strlen(last) < sizeof(ftype->ext) && (ftype = mallocLog(sizeof(*ftype)))) {
             strcpy(ftype->ext, last);
@@ -392,14 +394,14 @@ PI_ERR listRemoteFiles(const int volRef, const char *rmDir, const int depth) {
 
         strncat(strncat(strcpy(child, strcmp(rmDir, "/") ? rmDir : ""), "/", NAME_MAX-1), dirInfos[i].name, NAME_MAX-1);
         if (dlp_VFSFileOpen(sd, volRef, child, vfsModeRead, &fileRef) < 0) {
-            jp_logf(L_WARN, "%sWARNING: Could not open '%s' on volume %d\n", prefix, child, volRef);
+            jp_logf(L_DEBUG, "%s WARNING: Cannot get size/date from %s\n", prefix, dirInfos[i].name);
         } else {
             if (!(dirInfos[i].attr & vfsFileAttrDirectory) && (dlp_VFSFileSize(sd, fileRef, &filesize) < 0))
-                jp_logf(L_WARN, "%sWARNING: Could not get size of '%s' on volume %d\n", prefix, child, volRef);
+                jp_logf(L_DEBUG, "%s WARNING: Could not get size of     %s\n", prefix, dirInfos[i].name);
             if (dlp_VFSFileGetDate(sd, fileRef, vfsFileDateCreated, &dateCre) < 0)
-                jp_logf(L_WARN, "%s:WARNING: Could not get date created of file '%s' on volume %d\n", prefix, child, volRef);
+                jp_logf(L_DEBUG, "%s WARNING: No 'date created' from    %s\n", prefix, dirInfos[i].name);
             //~ if (dlp_VFSFileGetDate(sd, fileRef, vfsFileDateModified, &dateMod) < 0) // seems to be ignored by Palm
-                //~ jp_logf(L_WARN, "%s:WARNING: Could not get date modified of file '%s' on volume %d\n", prefix, child, volRef);
+                //~ jp_logf(L_WARN, "%s WARNING: No 'date modified' from   %s\n", prefix, dirInfos[i].name);
             dlp_VFSFileClose(sd, fileRef);
         }
         //~ jp_logf(L_DEBUG, "%s 0x%02x%10d %s %s %s\n", prefix, dirInfos[i].attr, filesize, isoTime(&dateCre), isoTime(&dateMod), dirInfos[i].name);
@@ -669,11 +671,14 @@ Exit:
 
 int casecmpFileTypeList(const char *fname) {
     char *ext = strrchr(fname, '.');
-    int result = 1;
     for (fileType *tmp = fileTypeList; ext && tmp; tmp = tmp->next) {
-        if (!(result = strcasecmp(ext, tmp->ext)))  break;
+        if (*(tmp->ext + 1) != '.') { // not has ".." separator
+            if (!strcasecmp(ext, tmp->ext))  return 1; // backup & restore
+        } else {
+            if (!strcasecmp(ext, tmp->ext + 1))  return 0; // only backup
+        }
     }
-    return result;
+    return -1; // no match, no sync
 }
 
 int cmpRemote(VFSDirInfo dirInfos[], int dirItems, const char *fname) {
@@ -776,7 +781,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         }
         if (!S_ISREG(fstat.st_mode) // use fstat to follow symlinks; (entry->d_type != DT_REG) doesn't do this
                 || strlen(entry->d_name) < 2
-                || casecmpFileTypeList(entry->d_name)
+                || casecmpFileTypeList(entry->d_name) <= 0
                 || !cmpRemote(dirInfos, dirItems, entry->d_name)) {
             continue;
         }
@@ -798,7 +803,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
                 vfsFileAttrDirectory   |
                 vfsFileAttrLink)
                 || strlen(fname) < 2
-                || casecmpFileTypeList(fname)) {
+                || casecmpFileTypeList(fname) < 0) {
             continue;
         }
         //~ jp_logf(L_DEBUG, "%s:      Backup remote file: '%s' to '%s'\n", MYNAME, fname, lcAlbum);
