@@ -92,7 +92,7 @@ static char *excludeDirs; // becomes freed by jp_free_prefs()
 static const unsigned MAX_VOLUMES = 16;
 static const unsigned MIN_DIR_ITEMS = 2;
 static const unsigned MAX_DIR_ITEMS = 1024;
-static const char *ROOTDIRS[] = {"Photos & Videos", "Fotos & Videos", "DCIM"};
+static const char *ROOTDIRS[] = {"/Photos & Videos", "/Fotos & Videos", "/DCIM"};
 static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"};
 static fileType *fileTypeList = NULL;
 static excludeDir *excludeDirList = NULL;
@@ -168,7 +168,7 @@ int plugin_startup(jp_startup_info *info) {
         }
     }
     for (char *last; !result && strlen(excludeDirs) > 0; *last = '\0') {
-        last = (last = strrchr(excludeDirs, ' ')) ? last + 1 : excludeDirs;
+        last = (last = strrchr(excludeDirs, ':')) ? last + 1 : excludeDirs;
         jp_logf(L_WARN, "%s: WARNING: Exclude dir '%s'\n", MYNAME, last);
         excludeDir *exDir;
         if (strlen(last) < sizeof(exDir->dir) && (exDir = mallocLog(sizeof(*exDir)))) {
@@ -393,6 +393,7 @@ PI_ERR listRemoteFiles(const int volRef, const char *rmDir, const int depth) {
         time_t dateCre = 0;
 
         strncat(strncat(strcpy(child, strcmp(rmDir, "/") ? rmDir : ""), "/", NAME_MAX-1), dirInfos[i].name, NAME_MAX-1);
+        //~ strncat(strcmp(rmDir, "/") ? strncat(strcat(child, rmDir), "/", NAME_MAX-1) : child, dirInfos[i].name, NAME_MAX-1); // for paths without '/' at start
         if (dlp_VFSFileOpen(sd, volRef, child, vfsModeRead, &fileRef) < 0) {
             jp_logf(L_DEBUG, "%s WARNING: Cannot get size/date from %s\n", prefix, dirInfos[i].name);
         } else {
@@ -536,7 +537,7 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
         goto Exit;
     }
     // Copy file.
-    jp_logf(L_GUI, "%s:      Backup %s, size %d ...", MYNAME, rmPath, filesize);
+    jp_logf(L_GUI, "%s:      Backup '%s', size %d ...", MYNAME, rmPath, filesize);
     for (int remaining = filesize; remaining > 0; remaining -= piBuf->used) {
         if (fileRead(fileRef, NULL, piBuf, remaining) < 0)  {
             filesize = -1; // remember error
@@ -703,6 +704,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
 
     if (name) {
         rmAlbum = strcat(strcat(strcpy(rmTmp ,rmRoot), "/"), name);
+        if (!cmpExcludeDirList(rmAlbum))  return result;
         if (dirP) { // indicates, that we are in restore-only mode, so need to create a new remote album dir.
             jp_logf(L_DEBUG, "%s:    Try to create dir '%s' on volume %d\n", MYNAME, rmAlbum, volRef);
             if ((result = dlp_VFSDirCreate(sd, volRef, rmAlbum)) < 0) {
@@ -750,6 +752,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
     } else {
         rmAlbum = (char *)rmRoot;
         lcAlbum = (char *)lcRoot;
+        if (!cmpExcludeDirList(rmAlbum))  return result;
     }
     jp_logf(L_GUI, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, name ? name : ".", rmRoot, volRef);
     if (!dirItems) // We are in backup mode !
