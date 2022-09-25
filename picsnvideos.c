@@ -65,6 +65,8 @@ see https://github.com/danbodoh/picsnvideos-jpilot";
 
 static const char *PREFS_FILE = "picsnvideos.rc";
 static prefType prefs[] = {
+    {"prefsVersion", INTTYPE, INTTYPE, 2, NULL, 0},
+    {"rootDirs", CHARTYPE, CHARTYPE, 0, "1>/Photos & Videos:1>/Fotos & Videos:/DCIM", 0},
     {"syncThumbnailDir", INTTYPE, INTTYPE, 0, NULL, 0},
     // JPEG picture
     // video (GSM phones)
@@ -80,6 +82,8 @@ static prefType prefs[] = {
     {"excludeDirs", CHARTYPE, CHARTYPE, 0, "/BLAZER:2>/PALM/Launcher", 0}
 };
 static const unsigned NUM_PREFS = sizeof(prefs)/sizeof(prefType);
+static long prefsVersion;
+static char *rootDirs; // becomes freed by jp_free_prefs()
 static long syncThumbnailDir;
 static char *fileTypes; // becomes freed by jp_free_prefs()
 static long useDateModified;
@@ -92,8 +96,8 @@ static char *excludeDirs; // becomes freed by jp_free_prefs()
 static const unsigned MAX_VOLUMES = 16;
 static const unsigned MIN_DIR_ITEMS = 2;
 static const unsigned MAX_DIR_ITEMS = 1024;
-static const char *ROOTDIRS[] = {"/Photos & Videos", "/Fotos & Videos", "/DCIM"};
 static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"};
+static fullPath *rootDirList = NULL;
 static fileType *fileTypeList = NULL;
 static fullPath *excludeDirList = NULL;
 static pi_buffer_t *piBuf, *piBuf2;
@@ -104,6 +108,7 @@ static int importantWarning = 0;
 
 
 static void *mallocLog(size_t size);
+int parsePaths(char *paths, fullPath **list, char *text);
 int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs);
 int syncVolume(int volRef);
 PI_ERR listRemoteFiles(int volRef, const char *dir, const int indent);
@@ -145,14 +150,18 @@ int plugin_startup(jp_startup_info *info) {
         jp_logf(L_WARN, "%s: WARNING: Could not read prefs[] from '%s'\n", MYNAME, PREFS_FILE);
     if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // To initialize with defaults, if pref file wasn't existent.
         jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE);
-    jp_get_pref(prefs, 0, &syncThumbnailDir, NULL);
-    jp_get_pref(prefs, 1, NULL, (const char **)&fileTypes);
-    jp_get_pref(prefs, 2, &useDateModified, NULL);
-    jp_get_pref(prefs, 3, &compareContent, NULL);
-    jp_get_pref(prefs, 4, &doBackup, NULL);
-    jp_get_pref(prefs, 5, &doRestore, NULL);
-    jp_get_pref(prefs, 6, &listFiles, NULL);
-    jp_get_pref(prefs, 7, NULL, (const char **)&excludeDirs);
+    jp_get_pref(prefs, 0, &prefsVersion, NULL);
+    jp_get_pref(prefs, 1, NULL, (const char **)&rootDirs);
+    jp_get_pref(prefs, 2, &syncThumbnailDir, NULL);
+    jp_get_pref(prefs, 3, NULL, (const char **)&fileTypes);
+    jp_get_pref(prefs, 4, &useDateModified, NULL);
+    jp_get_pref(prefs, 5, &compareContent, NULL);
+    jp_get_pref(prefs, 6, &doBackup, NULL);
+    jp_get_pref(prefs, 7, &doRestore, NULL);
+    jp_get_pref(prefs, 8, &listFiles, NULL);
+    jp_get_pref(prefs, 9, NULL, (const char **)&excludeDirs);
+    if (!result && strlen(rootDirs) > 0)
+        result = parsePaths(rootDirs, &rootDirList, "rootDirList");
     for (char *last; !result && (last = strrchr(fileTypes, '.')) >= fileTypes; *last = '\0') {
         if (last > fileTypes && *(last - 1) == '.') // found ".." separator
             last--;
@@ -166,31 +175,11 @@ int plugin_startup(jp_startup_info *info) {
             result = EXIT_FAILURE;
             break;
         }
+        jp_logf(L_DEBUG, "%s: Got fileTypeList item: extension '%s'\n", MYNAME, fileTypeList->ext);
     }
-    while (!result && strlen(excludeDirs) > 0) {
-        char *last = (last = strrchr(excludeDirs, ':')) ? last + 1 : excludeDirs;
-        fullPath *exDir;
-        if ((exDir = mallocLog(sizeof(*exDir)))) {
-            char *separator = strchr(last, '>');
-            if (separator) {
-                *separator = '\0';
-                exDir->volRef = atoi(last);
-                exDir->dir = separator + 1;
-            } else {
-                exDir->volRef = -1;
-                exDir->dir = last;
-            }
-            exDir->next = excludeDirList;
-            excludeDirList = exDir;
-        } else {
-            plugin_exit_cleanup();
-            result = EXIT_FAILURE;
-            break;
-        }
-        jp_logf(L_WARN, "%s: WARNING: Exclude dir '%s' on Volume %d\n", MYNAME, excludeDirList->dir, excludeDirList->volRef);
-        if (last > excludeDirs)  *--last = '\0';
-        else  break;
-    }
+    if (!result && strlen(excludeDirs) > 0)
+        result = parsePaths(excludeDirs, &excludeDirList, "excludeDirList");
+
     if (!result && (result = !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))))
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
     return result;
@@ -250,9 +239,9 @@ Continue:
     if (result != EXIT_SUCCESS)
         dlp_AddSyncLogEntry (sd, "Synchronization of Media was incomplete.\n");
     if (importantWarning) {
+        // Avoids bug <https://github.com/desrod/pilot-link/issues/11>, as then the file "Album.db" is created, so the dir is not empty anymore.
         jp_logf(L_WARN, "\n%s: IMPORTANT WARNING: Now open once the Media app on your Palm device to avoid crash (signal SIGCHLD) on next HotSync !!!\n\n", MYNAME);
         dlp_AddSyncLogEntry (sd, MYNAME": IMPORTANT WARNING: Now open once the Media app to avoid crash with JPilot on next HotSync !!!\n");
-        // Avoids bug <https://github.com/desrod/pilot-link/issues/11>, as then the file "Album.db" is created, so the dir is not empty anymore.
     }
 
     return result;
@@ -281,6 +270,33 @@ static void *mallocLog(size_t size) {
     if (!(p = malloc(size)))
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
     return p;
+}
+
+int parsePaths(char *paths, fullPath **list, char *text) {
+    for (char *last; ; *--last = '\0') {
+        last = (last = strrchr(paths, ':')) ? last + 1 : paths;
+        fullPath *path;
+        if ((path = mallocLog(sizeof(*path)))) {
+            char *separator = strchr(last, '>');
+            if (separator) {
+                *separator = '\0';
+                path->volRef = atoi(last);
+                path->dir = separator + 1;
+            } else {
+                path->volRef = -1;
+                path->dir = last;
+            }
+            path->next = *list;
+            (*list) = path;
+        } else {
+            plugin_exit_cleanup();
+            return EXIT_FAILURE;
+        }
+        jp_logf(L_DEBUG, "%s: Got %s item: dir '%s' on Volume %d\n", MYNAME, text, (*list)->dir, (*list)->volRef);
+        if (last == paths)
+            break;
+    }
+    return EXIT_SUCCESS;
 }
 
 int createDir(char *path, const char *dir) {
@@ -837,16 +853,19 @@ PI_ERR syncVolume(int volRef) {
     PI_ERR rootResult = -3, result = 0;
 
     jp_logf(L_DEBUG, "%s:  Searching roots on volume %d\n", MYNAME, volRef);
-    for (int d = 0; d < sizeof(ROOTDIRS)/sizeof(*ROOTDIRS); d++) {
+    for (fullPath *item = rootDirList; item; item = item->next) {
+        if ((item->volRef >= 0 && volRef != item->volRef))
+            continue;
+        char *rootDir = item->dir;
         VFSDirInfo dirInfos[MAX_DIR_ITEMS];
 
         // Open the remote root directory.
         FileRef dirRef;
-        if (dlp_VFSFileOpen(sd, volRef, ROOTDIRS[d], vfsModeRead, &dirRef) < 0) {
-            jp_logf(L_DEBUG, "%s:   Root '%s' does not exist on volume %d\n", MYNAME, ROOTDIRS[d], volRef);
+        if (dlp_VFSFileOpen(sd, volRef, rootDir, vfsModeRead, &dirRef) < 0) {
+            jp_logf(L_DEBUG, "%s:   Root '%s' does not exist on volume %d\n", MYNAME, rootDir, volRef);
             continue;
         }
-        jp_logf(L_DEBUG, "%s:   Opened root '%s' on volume %d\n", MYNAME, ROOTDIRS[d], volRef);
+        jp_logf(L_DEBUG, "%s:   Opened root '%s' on volume %d\n", MYNAME, rootDir, volRef);
         rootResult = 0;
 
         // Open the local root directory.
@@ -862,7 +881,7 @@ PI_ERR syncVolume(int volRef) {
 
         // Fetch the unfiled album, which is simply the root dir, and sync it.
         // Apparently the Treo 650 can store media in the root dir, as well as in album dirs.
-        result = syncAlbum(volRef, dirRef, ROOTDIRS[d], dirP, lcRoot, NULL);
+        result = syncAlbum(volRef, dirRef, rootDir, dirP, lcRoot, NULL);
 
         // Iterate through the remote root directory, looking for things that might be albums.
         int dirItems = 0;
@@ -871,7 +890,7 @@ PI_ERR syncVolume(int volRef) {
         unsigned long itr = (unsigned long)vfsIteratorStart;
         for (int batch; (enum dlpVFSFileIteratorConstants)itr != vfsIteratorStop; dirItems += batch) {
             batch = MIN(MAX_DIR_ITEMS / 2, MAX_DIR_ITEMS - dirItems);
-            jp_logf(L_DEBUG, "%s:   Enumerate root '%s', dirRef=%8lx, itr=%4lx, batch=%d, dirItems=%d\n", MYNAME, ROOTDIRS[d], dirRef, itr, batch, dirItems);
+            jp_logf(L_DEBUG, "%s:   Enumerate root '%s', dirRef=%8lx, itr=%4lx, batch=%d, dirItems=%d\n", MYNAME, rootDir, dirRef, itr, batch, dirItems);
             PI_ERR enRes;
             if ((enRes = dlp_VFSDirEntryEnumerate(sd, dirRef, &itr, &batch, dirInfos + dirItems)) < 0) {
                 // Crashes on empty directory (see: <https://github.com/juddmon/jpilot/issues/??>):
@@ -884,13 +903,13 @@ PI_ERR syncVolume(int volRef) {
             } else {
                 jp_logf(L_DEBUG, "%s:   Enumerate OK: enRes=%4d, dirRef=%8lx, itr=%4lx, batch=%d\n", MYNAME, enRes, dirRef, itr, batch);
             }
-            jp_logf(L_DEBUG, "%s:   Now search for remote albums on Volume %d in '%s' to sync ...\n", MYNAME, volRef, ROOTDIRS[d]);
+            jp_logf(L_DEBUG, "%s:   Now search for remote albums on Volume %d in '%s' to sync ...\n", MYNAME, volRef, rootDir);
             for (int i = dirItems; i < (dirItems + batch); i++) {
-                jp_logf(L_DEBUG, "%s:    Found remote album candidate '%s' in '%s'; attributes=%x\n", MYNAME,  dirInfos[i].name, ROOTDIRS[d], dirInfos[i].attr);
+                jp_logf(L_DEBUG, "%s:    Found remote album candidate '%s' in '%s'; attributes=%x\n", MYNAME,  dirInfos[i].name, rootDir, dirInfos[i].attr);
                 // Treo 650 has #Thumbnail dir that is not an album
                 if (dirInfos[i].attr & vfsFileAttrDirectory && (syncThumbnailDir || strcmp(dirInfos[i].name, "#Thumbnail"))) {
-                    jp_logf(L_DEBUG, "%s:    Found real remote album '%s' in '%s'\n", MYNAME, dirInfos[i].name, ROOTDIRS[d]);
-                    PI_ERR albumResult = syncAlbum(volRef, 0, ROOTDIRS[d], NULL, lcRoot, dirInfos[i].name);
+                    jp_logf(L_DEBUG, "%s:    Found real remote album '%s' in '%s'\n", MYNAME, dirInfos[i].name, rootDir);
+                    PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, NULL, lcRoot, dirInfos[i].name);
                     result = MIN(result, albumResult);
                 }
             }
@@ -905,7 +924,7 @@ PI_ERR syncVolume(int volRef) {
             //~ if (!strncasecmp(entry->d_name, "New_", 4)) { // Copy must exist locally, delete it after.
                 //~ PI_ERR piErr;
                 //~ char toDelete[NAME_MAX];
-                //~ strcat(strcat(strcpy(toDelete ,ROOTDIRS[d]), "/"), entry->d_name);
+                //~ strcat(strcat(strcpy(toDelete ,rootDir), "/"), entry->d_name);
                 //~ if ((piErr = dlp_VFSFileDelete(sd, volRef, toDelete))) {
                     //~ jp_logf(L_FATAL, "%s:     ERROR: %d; Not deleted remote album '%s'\n", MYNAME, piErr, toDelete);
                     //~ if (piErr == PI_ERR_DLP_PALMOS)
@@ -929,7 +948,7 @@ PI_ERR syncVolume(int volRef) {
                 continue;
             }
             jp_logf(L_DEBUG, "%s:    Found real local album '%s' in '%s'\n", MYNAME, entry->d_name, lcRoot + strlen(lcPath) + 1);
-            PI_ERR albumResult = syncAlbum(volRef, 0, ROOTDIRS[d], dirP, lcRoot, entry->d_name);
+            PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, dirP, lcRoot, entry->d_name);
             result = MIN(result, albumResult);
         }
 
