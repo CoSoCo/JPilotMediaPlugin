@@ -3,6 +3,7 @@ Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Added listRemoteFiles() with pref listFiles.
 * Only backup but not restore filetypes with ".."-prefix in fileTypes list.
 * Pref excludeDirs also effective on sync. Separate paths by ':'.
+* Distinguish excludeDirs also by volume numbers, separated by '>'.
 
 Version 0.4.2   Sept 15, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>

@@ -48,7 +48,7 @@
 typedef struct VFSInfo VFSInfo;
 typedef struct VFSDirInfo VFSDirInfo;
 typedef struct fileType {char ext[16]; struct fileType *next;} fileType;
-typedef struct excludeDir {char dir[NAME_MAX]; struct excludeDir *next;} excludeDir;
+typedef struct fullPath {int volRef; char *dir; struct fullPath *next;} fullPath;
 
 static const char HELP_TEXT[] =
 "JPilot plugin (c) 2008 by Dan Bodoh\n\
@@ -71,13 +71,13 @@ static prefType prefs[] = {
     // video (CDMA phones)
     // audio caption (GSM phones)
     // audio caption (CDMA phones)
-    {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.amr.qcp.3gp.3g2.avi" , 256},
+    {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.amr.qcp.3gp.3g2.avi", 0},
     {"useDateModified", INTTYPE, INTTYPE, 0, NULL, 0},
     {"compareContent", INTTYPE, INTTYPE, 0, NULL, 0},
     {"doBackup", INTTYPE, INTTYPE, 1, NULL, 0},
     {"doRestore", INTTYPE, INTTYPE, 1, NULL, 0},
     {"listFiles", INTTYPE, INTTYPE, 0, NULL, 0},
-    {"excludeDirs", CHARTYPE, CHARTYPE, 0, "/BLAZER", 0}
+    {"excludeDirs", CHARTYPE, CHARTYPE, 0, "/BLAZER:2>/PALM/Launcher", 0}
 };
 static const unsigned NUM_PREFS = sizeof(prefs)/sizeof(prefType);
 static long syncThumbnailDir;
@@ -95,7 +95,7 @@ static const unsigned MAX_DIR_ITEMS = 1024;
 static const char *ROOTDIRS[] = {"/Photos & Videos", "/Fotos & Videos", "/DCIM"};
 static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"};
 static fileType *fileTypeList = NULL;
-static excludeDir *excludeDirList = NULL;
+static fullPath *excludeDirList = NULL;
 static pi_buffer_t *piBuf, *piBuf2;
 static int sd; // the central socket descriptor.
 static char lcPath[NAME_MAX];
@@ -167,12 +167,19 @@ int plugin_startup(jp_startup_info *info) {
             break;
         }
     }
-    for (char *last; !result && strlen(excludeDirs) > 0; *last = '\0') {
-        last = (last = strrchr(excludeDirs, ':')) ? last + 1 : excludeDirs;
-        jp_logf(L_WARN, "%s: WARNING: Exclude dir '%s'\n", MYNAME, last);
-        excludeDir *exDir;
-        if (strlen(last) < sizeof(exDir->dir) && (exDir = mallocLog(sizeof(*exDir)))) {
-            strcpy(exDir->dir, last);
+    while (!result && strlen(excludeDirs) > 0) {
+        char *last = (last = strrchr(excludeDirs, ':')) ? last + 1 : excludeDirs;
+        fullPath *exDir;
+        if ((exDir = mallocLog(sizeof(*exDir)))) {
+            char *separator = strchr(last, '>');
+            if (separator) {
+                *separator = '\0';
+                exDir->volRef = atoi(last);
+                exDir->dir = separator + 1;
+            } else {
+                exDir->volRef = -1;
+                exDir->dir = last;
+            }
             exDir->next = excludeDirList;
             excludeDirList = exDir;
         } else {
@@ -180,9 +187,10 @@ int plugin_startup(jp_startup_info *info) {
             result = EXIT_FAILURE;
             break;
         }
-        if (last > excludeDirs)  last--;
+        jp_logf(L_WARN, "%s: WARNING: Exclude dir '%s' on Volume %d\n", MYNAME, excludeDirList->dir, excludeDirList->volRef);
+        if (last > excludeDirs)  *--last = '\0';
+        else  break;
     }
-    jp_free_prefs(prefs, NUM_PREFS);
     if (!result && (result = !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))))
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
     return result;
@@ -257,10 +265,11 @@ int plugin_exit_cleanup(void) {
         fileTypeList = fileTypeList->next;
         free(item);
     }
-    for (excludeDir *item; (item = excludeDirList);) {
+    for (fullPath *item; (item = excludeDirList);) {
         excludeDirList = excludeDirList->next;
         free(item);
     }
+    jp_free_prefs(prefs, NUM_PREFS);
     return EXIT_SUCCESS;
 }
 
@@ -362,10 +371,10 @@ int enumerateDir(const int volRef, const char *rmDir, VFSDirInfo dirInfos[]) {
     }
 }
 
-int cmpExcludeDirList(const char *dname) {
+int cmpExcludeDirList(const int volRef, const char *dname) {
     int result = 1;
-    for (excludeDir *tmp = excludeDirList; dname && tmp; tmp = tmp->next) {
-        if (!(result = strcmp(dname, tmp->dir)))  break;
+    for (fullPath *item = excludeDirList; dname && item; item = item->next) {
+        if ((item->volRef < 0 || volRef == item->volRef) && !(result = strcmp(dname, item->dir)))  break;
     }
     return result;
 }
@@ -383,7 +392,7 @@ PI_ERR listRemoteFiles(const int volRef, const char *rmDir, const int depth) {
     char prefix[] = MYNAME":                 ";
     prefix[MIN(sizeof(prefix) - 1, strlen(MYNAME) + 2 + depth)] = '\0';
 
-    if (!cmpExcludeDirList(rmDir))  return -1; // avoid bug <https://github.com/desrod/pilot-link/issues/11>
+    if (!cmpExcludeDirList(volRef, rmDir))  return -1; // avoid bug <https://github.com/desrod/pilot-link/issues/11>
     int dirItems = enumerateDir(volRef, rmDir, dirInfos);
     jp_logf(L_DEBUG, "%s%d remote files in '%s' on Volume %d ...\n", prefix, dirItems, rmDir, volRef);
     for (int i = 0; i < dirItems; i++) {
@@ -672,11 +681,11 @@ Exit:
 
 int casecmpFileTypeList(const char *fname) {
     char *ext = strrchr(fname, '.');
-    for (fileType *tmp = fileTypeList; ext && tmp; tmp = tmp->next) {
-        if (*(tmp->ext + 1) != '.') { // not has ".." separator
-            if (!strcasecmp(ext, tmp->ext))  return 1; // backup & restore
+    for (fileType *item = fileTypeList; ext && item; item = item->next) {
+        if (*(item->ext + 1) != '.') { // not has ".." separator
+            if (!strcasecmp(ext, item->ext))  return 1; // backup & restore
         } else {
-            if (!strcasecmp(ext, tmp->ext + 1))  return 0; // only backup
+            if (!strcasecmp(ext, item->ext + 1))  return 0; // only backup
         }
     }
     return -1; // no match, no sync
@@ -704,7 +713,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
 
     if (name) {
         rmAlbum = strcat(strcat(strcpy(rmTmp ,rmRoot), "/"), name);
-        if (!cmpExcludeDirList(rmAlbum))  return result;
+        if (!cmpExcludeDirList(volRef, rmAlbum))  return result;
         if (dirP) { // indicates, that we are in restore-only mode, so need to create a new remote album dir.
             jp_logf(L_DEBUG, "%s:    Try to create dir '%s' on volume %d\n", MYNAME, rmAlbum, volRef);
             if ((result = dlp_VFSDirCreate(sd, volRef, rmAlbum)) < 0) {
@@ -752,7 +761,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
     } else {
         rmAlbum = (char *)rmRoot;
         lcAlbum = (char *)lcRoot;
-        if (!cmpExcludeDirList(rmAlbum))  return result;
+        if (!cmpExcludeDirList(volRef, rmAlbum))  return result;
     }
     jp_logf(L_GUI, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, name ? name : ".", rmRoot, volRef);
     if (!dirItems) // We are in backup mode !
