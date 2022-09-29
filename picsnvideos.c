@@ -38,6 +38,7 @@
 
 #define MYNAME PACKAGE_NAME
 #define PCDIR "Media"
+#define ADDITIONAL_FILES "#AdditionalFiles"
 
 #define L_DEBUG JP_LOG_DEBUG
 #define L_INFO  JP_LOG_INFO // Unfortunately doesn't show up in GUI
@@ -48,7 +49,7 @@
 typedef struct VFSInfo VFSInfo;
 typedef struct VFSDirInfo VFSDirInfo;
 typedef struct fileType {char ext[16]; struct fileType *next;} fileType;
-typedef struct fullPath {int volRef; char *dir; struct fullPath *next;} fullPath;
+typedef struct fullPath {int volRef; char *path; struct fullPath *next;} fullPath;
 
 static const char HELP_TEXT[] =
 "JPilot plugin (c) 2008 by Dan Bodoh\n\
@@ -79,7 +80,8 @@ static prefType prefs[] = {
     {"doBackup", INTTYPE, INTTYPE, 1, NULL, 0},
     {"doRestore", INTTYPE, INTTYPE, 1, NULL, 0},
     {"listFiles", INTTYPE, INTTYPE, 0, NULL, 0},
-    {"excludeDirs", CHARTYPE, CHARTYPE, 0, "/BLAZER:2>/PALM/Launcher", 0}
+    {"excludeDirs", CHARTYPE, CHARTYPE, 0, "/BLAZER:2>/PALM/Launcher", 0},
+    {"additionalFiles", CHARTYPE, CHARTYPE, 0, "", 0}
 };
 static const unsigned NUM_PREFS = sizeof(prefs)/sizeof(prefType);
 static long prefsVersion;
@@ -92,6 +94,7 @@ static long doBackup;
 static long doRestore;
 static long listFiles;
 static char *excludeDirs; // becomes freed by jp_free_prefs()
+static char *additionalFiles; // becomes freed by jp_free_prefs()
 
 static const unsigned MAX_VOLUMES = 16;
 static const unsigned MIN_DIR_ITEMS = 2;
@@ -100,6 +103,7 @@ static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"};
 static fullPath *rootDirList = NULL;
 static fileType *fileTypeList = NULL;
 static fullPath *excludeDirList = NULL;
+static fullPath *additionalFileList = NULL;
 static pi_buffer_t *piBuf, *piBuf2;
 static int sd; // the central socket descriptor.
 static char lcPath[NAME_MAX];
@@ -112,6 +116,9 @@ int parsePaths(char *paths, fullPath **list, char *text);
 int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs);
 int syncVolume(int volRef);
 PI_ERR listRemoteFiles(int volRef, const char *dir, const int indent);
+static char *localRoot(const unsigned volRef);
+int createDir(char *path, const char *dir);
+int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcDir, const char *file);
 
 void plugin_version(int *major_version, int *minor_version) {
     *major_version = 0;
@@ -160,6 +167,7 @@ int plugin_startup(jp_startup_info *info) {
     jp_get_pref(prefs, 7, &doRestore, NULL);
     jp_get_pref(prefs, 8, &listFiles, NULL);
     jp_get_pref(prefs, 9, NULL, (const char **)&excludeDirs);
+    jp_get_pref(prefs, 10, NULL, (const char **)&additionalFiles);
     if (!result && strlen(rootDirs) > 0)
         result = parsePaths(rootDirs, &rootDirList, "rootDirList");
     for (char *last; !result && (last = strrchr(fileTypes, '.')) >= fileTypes; *last = '\0') {
@@ -179,6 +187,8 @@ int plugin_startup(jp_startup_info *info) {
     }
     if (!result && strlen(excludeDirs) > 0)
         result = parsePaths(excludeDirs, &excludeDirList, "excludeDirList");
+    if (!result && strlen(additionalFiles) > 0)
+        result = parsePaths(additionalFiles, &additionalFileList, "additionalFileList");
 
     if (!result && (result = !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))))
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
@@ -235,6 +245,36 @@ int plugin_sync(int socket) {
         result = EXIT_SUCCESS;
 Continue:
     }
+    // ToDo: log GUI "Additional files ..."
+    for (fullPath *item = additionalFileList; item; item = item->next) {
+        char *lcDir = localRoot(item->volRef);
+        if (!lcDir)  continue;
+        if (createDir(lcDir, ADDITIONAL_FILES))  continue;
+        jp_logf(L_GUI, "%s:     Created local directory '%s'.\n", MYNAME, lcDir); // ToDo: outside for loop
+        if (item->path[0] != '/') {
+            jp_logf(L_WARN, "%s:      WARNING: Missing '/' at start of additional file '%s', not syncing it.\n", MYNAME, item->path);
+            continue;
+        }
+        char *fname = strrchr(item->path, '/');
+        FileRef fileRef;
+        if (dlp_VFSFileOpen(sd, item->volRef, item->path, vfsModeRead, &fileRef) >= 0) {
+            unsigned long attr = 0;
+            dlp_VFSFileGetAttributes(sd, fileRef, &attr);
+            dlp_VFSFileClose(sd, fileRef);
+            if (attr & vfsFileAttrDirectory) {
+                if (!createDir(lcDir, item->path + 1))
+                    // ToDo: set date !
+                    jp_logf(L_GUI, "%s:      Created local directory '%s'.\n", MYNAME, lcDir);
+            } else {
+                *fname++ = '\0';
+                if (item->path[0] && createDir(lcDir, item->path + 1))  continue;
+                // ToDo: set date !
+                backupFileIfNeeded(item->volRef, item->path, lcDir, fname);
+            }
+        } else
+            jp_logf(L_DEBUG, "%s      WARNING: Cannot open remote file %s on Volume %d\n", MYNAME, item->path, item->volRef);
+    }
+
     jp_logf(L_DEBUG, "%s: Sync done -> result=%d\n", MYNAME, result);
     if (result != EXIT_SUCCESS)
         dlp_AddSyncLogEntry (sd, "Synchronization of Media was incomplete.\n");
@@ -275,24 +315,24 @@ static void *mallocLog(size_t size) {
 int parsePaths(char *paths, fullPath **list, char *text) {
     for (char *last; ; *--last = '\0') {
         last = (last = strrchr(paths, ':')) ? last + 1 : paths;
-        fullPath *path;
-        if ((path = mallocLog(sizeof(*path)))) {
+        fullPath *item;
+        if ((item = mallocLog(sizeof(*item)))) {
             char *separator = strchr(last, '>');
             if (separator) {
                 *separator = '\0';
-                path->volRef = atoi(last);
-                path->dir = separator + 1;
+                item->volRef = atoi(last);
+                item->path = separator + 1;
             } else {
-                path->volRef = -1;
-                path->dir = last;
+                item->volRef = -1;
+                item->path = last;
             }
-            path->next = *list;
-            (*list) = path;
+            item->next = *list;
+            (*list) = item;
         } else {
             plugin_exit_cleanup();
             return EXIT_FAILURE;
         }
-        jp_logf(L_DEBUG, "%s: Got %s item: dir '%s' on Volume %d\n", MYNAME, text, (*list)->dir, (*list)->volRef);
+        jp_logf(L_DEBUG, "%s: Got %s item: dir '%s' on Volume %d\n", MYNAME, text, (*list)->path, (*list)->volRef);
         if (last == paths)
             break;
     }
@@ -300,11 +340,24 @@ int parsePaths(char *paths, fullPath **list, char *text) {
 }
 
 int createDir(char *path, const char *dir) {
-    if (dir)  strcat(strcat(path, "/"), dir);
+    char *subDir = NULL;
+    if (dir) {
+        //~ jp_logf(L_DEBUG, "%s:      path='%s', dir='%s'\n", MYNAME, path, dir);
+        strcat(strcat(path, "/"), dir);
+        if ((subDir = strchr(dir, '/')))
+            path[strlen(path) - strlen(subDir)] = '\0';
+        //~ jp_logf(L_DEBUG, "%s:      path='%s', dir='%s', subDir='%s'\n", MYNAME, path, dir, subDir);
+    }
+    //~ jp_logf(L_DEBUG, "%s:     Before mkdir: path='%s', dir='%s'\n", MYNAME, path, dir);
     int result;
     if ((result = mkdir(path, 0777)) && errno != EEXIST) {
         jp_logf(L_FATAL, "%s:     ERROR: Could not create directory %s\n", MYNAME, path);
         return result;
+    }
+    // ToDo: set date !
+    if (subDir++) {
+        //~ jp_logf(L_DEBUG, "%s:       Before create: path='%s', dir='%s', subDir+1='%s'\n", MYNAME, path, dir, subDir);
+        return createDir(path, subDir);
     }
     return 0;
 }
@@ -390,7 +443,7 @@ int enumerateDir(const int volRef, const char *rmDir, VFSDirInfo dirInfos[]) {
 int cmpExcludeDirList(const int volRef, const char *dname) {
     int result = 1;
     for (fullPath *item = excludeDirList; dname && item; item = item->next) {
-        if ((item->volRef < 0 || volRef == item->volRef) && !(result = strcmp(dname, item->dir)))  break;
+        if ((item->volRef < 0 || volRef == item->volRef) && !(result = strcmp(dname, item->path)))  break;
     }
     return result;
 }
@@ -807,15 +860,14 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
             result = MIN(result, -1);
             continue;
         }
-        if (!S_ISREG(fstat.st_mode) // use fstat to follow symlinks; (entry->d_type != DT_REG) doesn't do this
-                || strlen(entry->d_name) < 2
-                || casecmpFileTypeList(entry->d_name) <= 0
-                || !cmpRemote(dirInfos, dirItems, entry->d_name)) {
-            continue;
+        if (S_ISREG(fstat.st_mode) // use fstat to follow symlinks; (entry->d_type != DT_REG) doesn't do this
+                && strlen(entry->d_name) > 2
+                && casecmpFileTypeList(entry->d_name) > 0
+                && cmpRemote(dirInfos, dirItems, entry->d_name)) {
+            //~ jp_logf(L_DEBUG, "%s:      Restore local file: '%s' to '%s'\n", MYNAME, entry->d_name, rmAlbum);
+            int restoreResult = restoreFile(volRef, lcAlbum, rmAlbum, entry->d_name);
+            result = MIN(result, restoreResult);
         }
-        //~ jp_logf(L_DEBUG, "%s:      Restore local file: '%s' to '%s'\n", MYNAME, entry->d_name, rmAlbum);
-        int restoreResult = restoreFile(volRef, lcAlbum, rmAlbum, entry->d_name);
-        result = MIN(result, restoreResult);
     }
     jp_logf(L_DEBUG, "%s:     Now search of %d remote files, which to backup ...\n", MYNAME, dirItems);
     // Iterate over all the remote files in the album dir, looking for un-synced files.
@@ -824,19 +876,18 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         jp_logf(L_DEBUG, "%s:      Found remote file '%s' attributes=%x\n", MYNAME, fname, dirInfos[i].attr);
         // Grab only regular files, but ignore the 'read only' and 'archived' bits,
         // and only with known extensions.
-        if (dirInfos[i].attr & (
+        if (!(dirInfos[i].attr & (
                 vfsFileAttrHidden      |
                 vfsFileAttrSystem      |
                 vfsFileAttrVolumeLabel |
                 vfsFileAttrDirectory   |
-                vfsFileAttrLink)
-                || strlen(fname) < 2
-                || casecmpFileTypeList(fname) < 0) {
-            continue;
+                vfsFileAttrLink))
+                && strlen(fname) > 1
+                && casecmpFileTypeList(fname) >= 0) {
+            //~ jp_logf(L_DEBUG, "%s:      Backup remote file: '%s' to '%s'\n", MYNAME, fname, lcAlbum);
+            int backupResult = backupFileIfNeeded(volRef, rmAlbum, lcAlbum, fname);
+            result = MIN(result, backupResult);
         }
-        //~ jp_logf(L_DEBUG, "%s:      Backup remote file: '%s' to '%s'\n", MYNAME, fname, lcAlbum);
-        int backupResult = backupFileIfNeeded(volRef, rmAlbum, lcAlbum, fname);
-        result = MIN(result, backupResult);
     }
     if (name)  closedir(dirP);
     else  rewinddir(dirP);
@@ -856,7 +907,7 @@ PI_ERR syncVolume(int volRef) {
     for (fullPath *item = rootDirList; item; item = item->next) {
         if ((item->volRef >= 0 && volRef != item->volRef))
             continue;
-        char *rootDir = item->dir;
+        char *rootDir = item->path;
         VFSDirInfo dirInfos[MAX_DIR_ITEMS];
 
         // Open the remote root directory.
@@ -869,8 +920,8 @@ PI_ERR syncVolume(int volRef) {
         rootResult = 0;
 
         // Open the local root directory.
-        char *lcRoot;
-        if (!(lcRoot = localRoot(volRef)))
+        char *lcRoot = localRoot(volRef);
+        if (!lcRoot)
             goto Continue;
         DIR *dirP;
         if (!(dirP = opendir(lcRoot))) {
@@ -906,8 +957,9 @@ PI_ERR syncVolume(int volRef) {
             jp_logf(L_DEBUG, "%s:   Now search for remote albums on Volume %d in '%s' to sync ...\n", MYNAME, volRef, rootDir);
             for (int i = dirItems; i < (dirItems + batch); i++) {
                 jp_logf(L_DEBUG, "%s:    Found remote album candidate '%s' in '%s'; attributes=%x\n", MYNAME,  dirInfos[i].name, rootDir, dirInfos[i].attr);
-                // Treo 650 has #Thumbnail dir that is not an album
-                if (dirInfos[i].attr & vfsFileAttrDirectory && (syncThumbnailDir || strcmp(dirInfos[i].name, "#Thumbnail"))) {
+                if (dirInfos[i].attr & vfsFileAttrDirectory
+                        && (syncThumbnailDir || strcmp(dirInfos[i].name, "#Thumbnail")) // Treo 650 has #Thumbnail dir that is not an album
+                        && strcmp(dirInfos[i].name, ADDITIONAL_FILES)) {
                     jp_logf(L_DEBUG, "%s:    Found real remote album '%s' in '%s'\n", MYNAME, dirInfos[i].name, rootDir);
                     PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, NULL, lcRoot, dirInfos[i].name);
                     result = MIN(result, albumResult);
@@ -940,16 +992,16 @@ PI_ERR syncVolume(int volRef) {
                 result = MIN(result, -2);
                 continue;
             }
-            if (!S_ISDIR(fstat.st_mode) // use fstat to follow symlinks; (entry->d_type != DT_Dir) doesn't do this
-                    || !strcmp(entry->d_name, ".")
-                    || !strcmp(entry->d_name, "..")
-                    || !(syncThumbnailDir || strcmp(entry->d_name, "#Thumbnail"))
-                    || !cmpRemote(dirInfos, dirItems, entry->d_name)) {
-                continue;
+            if (S_ISDIR(fstat.st_mode) // use fstat to follow symlinks; (entry->d_type != DT_Dir) doesn't do this
+                    && strcmp(entry->d_name, ".")
+                    && strcmp(entry->d_name, "..")
+                    && (syncThumbnailDir || strcmp(entry->d_name, "#Thumbnail")) // Treo 650 has #Thumbnail dir that is not an album
+                    && strcmp(entry->d_name, ADDITIONAL_FILES)
+                    && cmpRemote(dirInfos, dirItems, entry->d_name)) {
+                jp_logf(L_DEBUG, "%s:    Found real local album '%s' in '%s'\n", MYNAME, entry->d_name, lcRoot + strlen(lcPath) + 1);
+                PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, dirP, lcRoot, entry->d_name);
+                result = MIN(result, albumResult);
             }
-            jp_logf(L_DEBUG, "%s:    Found real local album '%s' in '%s'\n", MYNAME, entry->d_name, lcRoot + strlen(lcPath) + 1);
-            PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, dirP, lcRoot, entry->d_name);
-            result = MIN(result, albumResult);
         }
 
         closedir(dirP);

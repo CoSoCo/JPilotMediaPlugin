@@ -5,6 +5,7 @@ Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Pref excludeDirs also effective on sync. Separate paths by ':'.
 * Distinguish excludeDirs also by volume numbers, separated by '>'.
 * Added prefsVersion. Define rootDirs by pref.
+* New pref to process additional files.
 
 Version 0.4.2   Sept 15, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
