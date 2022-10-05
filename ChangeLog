@@ -6,6 +6,7 @@ Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Distinguish excludeDirs also by volume numbers, separated by '>'.
 * Added prefsVersion. Define rootDirs by pref.
 * New pref to process additional files.
+* New pref to delete single files.
 
 Version 0.4.2   Sept 15, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
