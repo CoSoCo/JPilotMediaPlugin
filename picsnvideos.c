@@ -38,6 +38,7 @@
 
 #define MYNAME PACKAGE_NAME
 #define PCDIR "Media"
+#define PREFS_VERSION 3
 #define ADDITIONAL_FILES "#AdditionalFiles"
 
 #define L_DEBUG JP_LOG_DEBUG
@@ -48,8 +49,7 @@
 
 typedef struct VFSInfo VFSInfo;
 typedef struct VFSDirInfo VFSDirInfo;
-typedef struct fileType {char ext[16]; struct fileType *next;} fileType;
-typedef struct fullPath {int volRef; char *path; struct fullPath *next;} fullPath;
+typedef struct fullPath {int volRef; char *name; struct fullPath *next;} fullPath;
 
 static const char HELP_TEXT[] =
 "JPilot plugin (c) 2008 by Dan Bodoh\n\
@@ -66,7 +66,7 @@ see https://github.com/danbodoh/picsnvideos-jpilot";
 
 static const char *PREFS_FILE = "picsnvideos.rc";
 static prefType prefs[] = {
-    {"prefsVersion", INTTYPE, INTTYPE, 2, NULL, 0},
+    {"prefsVersion", INTTYPE, INTTYPE, PREFS_VERSION, NULL, 0},
     {"rootDirs", CHARTYPE, CHARTYPE, 0, "1>/Photos & Videos:1>/Fotos & Videos:/DCIM", 0},
     {"syncThumbnailDir", INTTYPE, INTTYPE, 0, NULL, 0},
     // JPEG picture
@@ -74,7 +74,7 @@ static prefType prefs[] = {
     // video (CDMA phones)
     // audio caption (GSM phones)
     // audio caption (CDMA phones)
-    {"fileTypes", CHARTYPE, CHARTYPE, 0, ".jpg.amr.qcp.3gp.3g2.avi", 0},
+    {"fileTypes", CHARTYPE, CHARTYPE, 0, "jpg:amr:qcp:3gp:3g2:avi", 0},
     {"useDateModified", INTTYPE, INTTYPE, 0, NULL, 0},
     {"compareContent", INTTYPE, INTTYPE, 0, NULL, 0},
     {"doBackup", INTTYPE, INTTYPE, 1, NULL, 0},
@@ -103,7 +103,7 @@ static const unsigned MIN_DIR_ITEMS = 2;
 static const unsigned MAX_DIR_ITEMS = 1024;
 static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"}; // ToDo: use with '/'
 static fullPath *rootDirList = NULL;
-static fileType *fileTypeList = NULL;
+static fullPath *fileTypeList = NULL;
 static fullPath *excludeDirList = NULL;
 static fullPath *deleteFileList = NULL;
 static fullPath *additionalFileList = NULL;
@@ -126,7 +126,6 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
 
 // ToDo: replace strcat() by stpcpy()
 // ToDo: do not expect and work with starting '/' on file paths
-// ToDo: merge FileType and FullPath
 
 void plugin_version(int *major_version, int *minor_version) {
     *major_version = 0;
@@ -158,7 +157,6 @@ int plugin_help(char **text, int *width, int *height) {
 }
 
 int plugin_startup(jp_startup_info *info) {
-    int result = EXIT_SUCCESS;
     jp_init();
     jp_pref_init(prefs, NUM_PREFS);
     if (jp_pref_read_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0)
@@ -166,6 +164,10 @@ int plugin_startup(jp_startup_info *info) {
     if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // To initialize with defaults, if pref file wasn't existent.
         jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE);
     jp_get_pref(prefs, 0, &prefsVersion, NULL);
+    if (prefsVersion != PREFS_VERSION) {
+        jp_logf(L_FATAL, "%s: ERROR: Version of preferences file '%s' is not %d. Please update it.\n", MYNAME, PREFS_FILE, PREFS_VERSION);
+        return EXIT_FAILURE;
+    }
     jp_get_pref(prefs, 1, NULL, (const char **)&rootDirs);
     jp_get_pref(prefs, 2, &syncThumbnailDir, NULL);
     jp_get_pref(prefs, 3, NULL, (const char **)&fileTypes);
@@ -177,33 +179,16 @@ int plugin_startup(jp_startup_info *info) {
     jp_get_pref(prefs, 9, NULL, (const char **)&excludeDirs);
     jp_get_pref(prefs, 10, NULL, (const char **)&deleteFiles);
     jp_get_pref(prefs, 11, NULL, (const char **)&additionalFiles);
-    if (!result && strlen(rootDirs) > 0)
-        result = parsePaths(rootDirs, &rootDirList, "rootDirs");
-    for (char *last; !result && (last = strrchr(fileTypes, '.')) >= fileTypes; *last = '\0') {
-        if (last > fileTypes && *(last - 1) == '.') // found ".." separator
-            last--;
-        fileType *ftype;
-        if (strlen(last) < sizeof(ftype->ext) && (ftype = mallocLog(sizeof(*ftype)))) {
-            strcpy(ftype->ext, last);
-            ftype->next = fileTypeList;
-            fileTypeList = ftype;
-        } else {
-            plugin_exit_cleanup();
-            result = EXIT_FAILURE;
-            break;
-        }
-        jp_logf(L_DEBUG, "%s: Got fileTypeList item: extension '%s'\n", MYNAME, fileTypeList->ext);
-    }
-    if (!result && strlen(excludeDirs) > 0)
-        result = parsePaths(excludeDirs, &excludeDirList, "excludeDirs");
-    if (!result && strlen(deleteFiles) > 0)
-        result = parsePaths(deleteFiles, &deleteFileList, "deleteFiles");
-    if (!result && strlen(additionalFiles) > 0)
-        result = parsePaths(additionalFiles, &additionalFileList, "additionalFiles");
-
-    if (!result && (result = !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))))
+    if (parsePaths(rootDirs, &rootDirList, "rootDirs") != EXIT_SUCCESS
+            || parsePaths(fileTypes, &fileTypeList, "fileTypes") != EXIT_SUCCESS
+            || parsePaths(excludeDirs, &excludeDirList, "excludeDirs") != EXIT_SUCCESS
+            || parsePaths(deleteFiles, &deleteFileList, "deleteFiles") != EXIT_SUCCESS
+            || parsePaths(additionalFiles, &additionalFileList, "additionalFiles") != EXIT_SUCCESS
+            || !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))) {
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
-    return result;
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }
 
 int plugin_sync(int socket) {
@@ -258,18 +243,18 @@ Continue:
     if (deleteFileList)
         jp_logf(L_GUI, "%s: Delete files from pref 'deleteFiles' ...\n", MYNAME);
     for (fullPath *item = deleteFileList; item; item = item->next) {
-        if (item->path[0] != '/') {
-            jp_logf(L_WARN, "%s:      WARNING: Missing '/' at start of file '%s' on volume %d, not deleting it.\n", MYNAME, item->path, item->volRef);
+        if (item->name[0] != '/') {
+            jp_logf(L_WARN, "%s:      WARNING: Missing '/' at start of file '%s' on volume %d, not deleting it.\n", MYNAME, item->name, item->volRef);
             continue;
         }
-        if ((piErr = dlp_VFSFileDelete(sd, item->volRef, item->path))) {
-            jp_logf(L_FATAL, "%s:      ERROR: %d; Not deleted remote file '%s' on volume %d\n", MYNAME, piErr, item->path, item->volRef);
+        if ((piErr = dlp_VFSFileDelete(sd, item->volRef, item->name))) {
+            jp_logf(L_FATAL, "%s:      ERROR: %d; Not deleted remote file '%s' on volume %d\n", MYNAME, piErr, item->name, item->volRef);
             if (piErr == PI_ERR_DLP_PALMOS && (piErr = pi_palmos_error(sd)))
                 jp_logf(L_FATAL, "%s:       PalmOS ERROR: %d%s\n", MYNAME, piErr,
                         (piErr == 10760) ? "; File was not found at the path specified." :
                         (piErr == 10765) ? "; Can't delete non-empty directory." : "");
         } else
-            jp_logf(L_GUI, "%s:      Deleted remote file '%s' on volume %d\n", MYNAME, item->path, item->volRef);
+            jp_logf(L_GUI, "%s:      Deleted remote file '%s' on volume %d\n", MYNAME, item->name, item->volRef);
     }
 
     if (additionalFileList)
@@ -277,28 +262,28 @@ Continue:
     for (fullPath *item = additionalFileList; item; item = item->next) {
         char *lcDir = localRoot(item->volRef);
         if (!lcDir || (piErr = createDir(lcDir, ADDITIONAL_FILES) | piErr))  continue;
-        if (item->path[0] != '/') {
-            jp_logf(L_WARN, "%s:      WARNING: Missing '/' at start of additional file '%s' on volume %d, not syncing it.\n", MYNAME, item->path, item->volRef);
+        if (item->name[0] != '/') {
+            jp_logf(L_WARN, "%s:      WARNING: Missing '/' at start of additional file '%s' on volume %d, not syncing it.\n", MYNAME, item->name, item->volRef);
             continue;
         }
-        char *fname = strrchr(item->path, '/');
+        char *fname = strrchr(item->name, '/');
         FileRef fileRef;
-        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->path, vfsModeRead, &fileRef)) >= 0) {
+        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0) {
             unsigned long attr = 0;
             dlp_VFSFileGetAttributes(sd, fileRef, &attr);
             dlp_VFSFileClose(sd, fileRef);
             if (attr & vfsFileAttrDirectory) {
-                if (!createDir(lcDir, item->path + 1))
+                if (!createDir(lcDir, item->name + 1))
                     // ToDo: set date !
                     jp_logf(L_GUI, "%s:      Created local directory '%s'.\n", MYNAME, lcDir);
             } else {
                 *fname++ = '\0';
-                if (item->path[0] && createDir(lcDir, item->path + 1))  continue;
+                if (item->name[0] && createDir(lcDir, item->name + 1))  continue;
                 // ToDo: set date !
-                backupFileIfNeeded(item->volRef, item->path, lcDir, fname);
+                backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
             }
         } else { // ToDo: restore file
-            jp_logf(L_DEBUG, "%s      WARNING: %d; Cannot open remote file %s on Volume %d\n", MYNAME, piErr, item->path, item->volRef);
+            jp_logf(L_DEBUG, "%s      WARNING: %d; Cannot open remote file %s on Volume %d\n", MYNAME, piErr, item->name, item->volRef);
             if (piErr == PI_ERR_DLP_PALMOS)
                 jp_logf(L_FATAL, "%s:        PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
             }
@@ -321,11 +306,7 @@ int plugin_exit_cleanup(void) {
     pi_buffer_free(piBuf);
     pi_buffer_free(piBuf2);
     freePathList(rootDirList);
-    // ToDo: merge FileType and FullPath
-    for (fileType *item; (item = fileTypeList);) {
-        fileTypeList = fileTypeList->next;
-        free(item);
-    }
+    freePathList(fileTypeList);
     freePathList(excludeDirList);
     freePathList(deleteFileList);
     freePathList(additionalFileList);
@@ -343,7 +324,6 @@ static void *mallocLog(size_t size) {
     return p;
 }
 
-// ToDo: return *list directly
 int parsePaths(char *paths, fullPath **list, char *text) {
     for (char *last; *paths != '\0'; *--last = '\0') {
         if (*(last = (last = strrchr(paths, ':')) ? last + 1 : paths) == '\0') {
@@ -356,18 +336,19 @@ int parsePaths(char *paths, fullPath **list, char *text) {
             if (separator) {
                 *separator = '\0';
                 item->volRef = atoi(last);
-                item->path = separator + 1;
+                item->name = separator + 1;
             } else {
                 item->volRef = -1;
-                item->path = last;
+                item->name = last;
             }
             item->next = *list;
             (*list) = item;
         } else {
-            plugin_exit_cleanup();
+            freePathList(*list);
+            (*list) = NULL;
             return EXIT_FAILURE;
         }
-        jp_logf(L_DEBUG, "%s: Got %s item: dir '%s' on Volume %d\n", MYNAME, text, (*list)->path, (*list)->volRef);
+        jp_logf(L_DEBUG, "%s: Got %s item: dir '%s' on Volume %d\n", MYNAME, text, (*list)->name, (*list)->volRef);
         if (last == paths)
             break;
     }
@@ -485,7 +466,7 @@ int enumerateDir(const int volRef, const char *rmDir, VFSDirInfo dirInfos[]) {
 int cmpExcludeDirList(const int volRef, const char *dname) {
     int result = 1;
     for (fullPath *item = excludeDirList; dname && item; item = item->next) {
-        if ((item->volRef < 0 || volRef == item->volRef) && !(result = strcmp(dname, item->path)))  break;
+        if ((item->volRef < 0 || volRef == item->volRef) && !(result = strcmp(dname, item->name)))  break;
     }
     return result;
 }
@@ -792,11 +773,11 @@ Exit:
 
 int casecmpFileTypeList(const char *fname) {
     char *ext = strrchr(fname, '.');
-    for (fileType *item = fileTypeList; ext && item; item = item->next) {
-        if (*(item->ext + 1) != '.') { // not has ".." separator
-            if (!strcasecmp(ext, item->ext))  return 1; // backup & restore
+    for (fullPath *item = fileTypeList; ext && item; item = item->next) {
+        if (*(item->name) != '-') {
+            if (!strcasecmp(ext + 1, item->name))  return 1; // backup & restore
         } else {
-            if (!strcasecmp(ext, item->ext + 1))  return 0; // only backup
+            if (!strcasecmp(ext + 1, item->name + 1))  return 0; // only backup
         }
     }
     return -1; // no match, no sync
@@ -934,7 +915,7 @@ PI_ERR syncVolume(int volRef) {
     for (fullPath *item = rootDirList; item; item = item->next) {
         if ((item->volRef >= 0 && volRef != item->volRef))
             continue;
-        char *rootDir = item->path;
+        char *rootDir = item->name;
         VFSDirInfo dirInfos[MAX_DIR_ITEMS];
 
         // Open the remote root directory.
