@@ -158,14 +158,23 @@ int plugin_help(char **text, int *width, int *height) {
 
 int plugin_startup(jp_startup_info *info) {
     jp_init();
+    return EXIT_SUCCESS;
+}
+
+int plugin_sync(int socket) {
+    int volRefs[MAX_VOLUMES];
+    int volumes = MAX_VOLUMES;
+    sd = socket;
+
+    // Read and process Preferences.
     jp_pref_init(prefs, NUM_PREFS);
     if (jp_pref_read_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0)
         jp_logf(L_WARN, "%s: WARNING: Could not read prefs[] from '%s'\n", MYNAME, PREFS_FILE);
-    if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // To initialize with defaults, if pref file wasn't existent.
-        jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE);
+    if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // If pref file wasn't existent ...
+        jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE); // initialize with defaults.
     jp_get_pref(prefs, 0, &prefsVersion, NULL);
     if (prefsVersion != PREFS_VERSION) {
-        jp_logf(L_FATAL, "%s: ERROR: Version of preferences file '%s' is not %d. Please update it.\n", MYNAME, PREFS_FILE, PREFS_VERSION);
+        jp_logf(L_FATAL, "%s: ERROR: Version of preferences file '%s' must be %d, please update it!\n", MYNAME, PREFS_FILE, PREFS_VERSION);
         return EXIT_FAILURE;
     }
     jp_get_pref(prefs, 1, NULL, (const char **)&rootDirs);
@@ -188,13 +197,6 @@ int plugin_startup(jp_startup_info *info) {
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
         return EXIT_FAILURE;
     }
-    return EXIT_SUCCESS;
-}
-
-int plugin_sync(int socket) {
-    int volRefs[MAX_VOLUMES];
-    int volumes = MAX_VOLUMES;
-    sd = socket;
 
     // Use $JPILOT_HOME/.jpilot/ or current directory for PCDIR.
     if (jp_get_home_file_name(PCDIR, lcPath, NAME_MAX) < 0) {
