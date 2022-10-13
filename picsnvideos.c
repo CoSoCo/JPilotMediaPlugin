@@ -42,7 +42,7 @@
 #define ADDITIONAL_FILES "#AdditionalFiles"
 
 #define L_DEBUG JP_LOG_DEBUG
-#define L_INFO  JP_LOG_INFO // Unfortunately doesn't show up in GUI
+#define L_INFO  JP_LOG_WARN // JP_LOG_INFO unfortunately doesn't show up in GUI, so use JP_LOG_WARN.
 #define L_WARN  JP_LOG_WARN
 #define L_FATAL JP_LOG_FATAL
 #define L_GUI   JP_LOG_GUI
@@ -121,8 +121,10 @@ int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs);
 int syncVolume(int volRef);
 PI_ERR listRemoteFiles(int volRef, const char *dir, const int indent);
 static char *localRoot(const unsigned volRef);
-int createDir(char *path, const char *dir);
+int createLocalDir(char *path, const char *dir);
+PI_ERR createRemoteDir(const int volRef, char *path, const char *dir);
 int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcDir, const char *file);
+int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file);
 
 // ToDo: replace strcat() by stpcpy()
 // ToDo: do not expect and work with starting '/' on file paths
@@ -162,11 +164,9 @@ int plugin_startup(jp_startup_info *info) {
 }
 
 int plugin_sync(int socket) {
-    int volRefs[MAX_VOLUMES];
-    int volumes = MAX_VOLUMES;
     sd = socket;
 
-    // Read and process Preferences.
+    // Read and process preferences.
     jp_pref_init(prefs, NUM_PREFS);
     if (jp_pref_read_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0)
         jp_logf(L_WARN, "%s: WARNING: Could not read prefs[] from '%s'\n", MYNAME, PREFS_FILE);
@@ -188,12 +188,12 @@ int plugin_sync(int socket) {
     jp_get_pref(prefs, 9, NULL, (const char **)&excludeDirs);
     jp_get_pref(prefs, 10, NULL, (const char **)&deleteFiles);
     jp_get_pref(prefs, 11, NULL, (const char **)&additionalFiles);
-    if (parsePaths(rootDirs, &rootDirList, "rootDirs") != EXIT_SUCCESS
-            || parsePaths(fileTypes, &fileTypeList, "fileTypes") != EXIT_SUCCESS
-            || parsePaths(excludeDirs, &excludeDirList, "excludeDirs") != EXIT_SUCCESS
-            || parsePaths(deleteFiles, &deleteFileList, "deleteFiles") != EXIT_SUCCESS
-            || parsePaths(additionalFiles, &additionalFileList, "additionalFiles") != EXIT_SUCCESS
-            || !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))) {
+    if (    parsePaths(rootDirs, &rootDirList, "rootDirs") != EXIT_SUCCESS ||
+            parsePaths(fileTypes, &fileTypeList, "fileTypes") != EXIT_SUCCESS ||
+            parsePaths(excludeDirs, &excludeDirList, "excludeDirs") != EXIT_SUCCESS ||
+            parsePaths(deleteFiles, &deleteFileList, "deleteFiles") != EXIT_SUCCESS ||
+            parsePaths(additionalFiles, &additionalFileList, "additionalFiles") != EXIT_SUCCESS ||
+            !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))) {
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
         return EXIT_FAILURE;
     }
@@ -204,9 +204,9 @@ int plugin_sync(int socket) {
         strcpy(lcPath, PCDIR);
     }
     if (listFiles)
-        jp_logf(L_GUI, "%s: List all files from the Palm device to the terminal, needs: 'jpilot -d'\n", MYNAME);
+        jp_logf(L_INFO, "%s: List all files from the Palm device to the terminal, needs: 'jpilot -d'\n", MYNAME);
     else {
-        jp_logf(L_GUI, "%s: Start syncing with '%s ...'\n", MYNAME, lcPath);
+        jp_logf(L_INFO, "%s: Start syncing with '%s ...'\n", MYNAME, lcPath);
         // Check if there are any file types loaded.
         if (!fileTypeList) {
             jp_logf(L_FATAL, "%s: ERROR: Could not find any file types from '%s'; No media synced.\n", MYNAME, PREFS_FILE);
@@ -215,6 +215,8 @@ int plugin_sync(int socket) {
     }
 
     // Get list of the volumes on the pilot.
+    int volRefs[MAX_VOLUMES];
+    int volumes = MAX_VOLUMES;
     if (volumeEnumerateIncludeHidden(sd, &volumes, volRefs) < 0) {
         jp_logf(L_FATAL, "%s: ERROR: Could not find any VFS volumes; No files to sync or list.\n", MYNAME);
         return EXIT_FAILURE;
@@ -222,17 +224,17 @@ int plugin_sync(int socket) {
 
     // Scan all the volumes for media and backup them.
     int result = EXIT_FAILURE;
+    PI_ERR piErr, piOSErr;
     for (int i=0; i<volumes; i++) {
-        PI_ERR volResult;
         if (listFiles) { // List all files from the Palm device, but don't sync.
             if (listRemoteFiles(volRefs[i], "/", 1) < 0)  goto Continue;
-        } else if ((volResult = syncVolume(volRefs[i])) < -2) {
+        } else if ((piErr = syncVolume(volRefs[i])) < -2) {
             snprintf(syncLogEntry, sizeof(syncLogEntry),
                     "%s:  WARNING: Could not find any media on volume %d; No media synced.\n", MYNAME, volRefs[i]);
             jp_logf(L_WARN, syncLogEntry);
             dlp_AddSyncLogEntry (sd, syncLogEntry);
             goto Continue;
-        } else if (volResult < 0) {
+        } else if (piErr < 0) {
             snprintf(syncLogEntry, sizeof(syncLogEntry),
                     "%s:  WARNING: Errors occured on volume %d; Some media may not be synced.\n", MYNAME, volRefs[i]);
             jp_logf(L_WARN, syncLogEntry);
@@ -241,58 +243,70 @@ int plugin_sync(int socket) {
         result = EXIT_SUCCESS;
 Continue:
     }
-    PI_ERR piErr = 0;
+
+    // Process deleteFileList ...
     if (deleteFileList)
-        jp_logf(L_GUI, "%s: Delete files from pref 'deleteFiles' ...\n", MYNAME);
+        jp_logf(L_INFO, "%s: Delete files from pref 'deleteFiles' ...\n", MYNAME);
     for (fullPath *item = deleteFileList; item; item = item->next) {
         if (item->name[0] != '/') {
-            jp_logf(L_WARN, "%s:      WARNING: Missing '/' at start of file '%s' on volume %d, not deleting it.\n", MYNAME, item->name, item->volRef);
+            jp_logf(L_WARN, "%s:     WARNING: Missing '/' at start of file '%s' on volume %d, not deleting it.\n", MYNAME, item->name, item->volRef);
             continue;
         }
         if ((piErr = dlp_VFSFileDelete(sd, item->volRef, item->name))) {
-            jp_logf(L_FATAL, "%s:      ERROR: %d; Not deleted remote file '%s' on volume %d\n", MYNAME, piErr, item->name, item->volRef);
-            if (piErr == PI_ERR_DLP_PALMOS && (piErr = pi_palmos_error(sd)))
-                jp_logf(L_FATAL, "%s:       PalmOS ERROR: %d%s\n", MYNAME, piErr,
-                        (piErr == 10760) ? "; File was not found at the path specified." :
-                        (piErr == 10765) ? "; Can't delete non-empty directory." : "");
+            piOSErr = piErr == PI_ERR_DLP_PALMOS ? pi_palmos_error(sd) : 0;
+            jp_logf(L_FATAL, "%s:     %sERROR: %d; %s '%s' on volume %d\n", MYNAME, piOSErr ? "PalmOS " : "", piOSErr ? piOSErr : piErr,
+                    (piOSErr == 10760) ? "Not found the to be deleted file" :
+                    (piOSErr == 10765) ? "Can't delete non-empty directory" :
+                    "Not deleted remote file", item->name, item->volRef);
         } else
-            jp_logf(L_GUI, "%s:      Deleted remote file '%s' on volume %d\n", MYNAME, item->name, item->volRef);
+            jp_logf(L_INFO, "%s:     Deleted remote file '%s' on volume %d\n", MYNAME, item->name, item->volRef);
     }
 
+    // Process additionalFileList ...
     if (additionalFileList)
-        jp_logf(L_GUI, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME/%s ...'\n", MYNAME, lcPath, ADDITIONAL_FILES);
+        jp_logf(L_INFO, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME/%s ...'\n", MYNAME, lcPath, ADDITIONAL_FILES);
     for (fullPath *item = additionalFileList; item; item = item->next) {
-        char *lcDir = localRoot(item->volRef);
-        if (!lcDir || (piErr = createDir(lcDir, ADDITIONAL_FILES) | piErr))  continue;
         if (item->name[0] != '/') {
-            jp_logf(L_WARN, "%s:      WARNING: Missing '/' at start of additional file '%s' on volume %d, not syncing it.\n", MYNAME, item->name, item->volRef);
+            jp_logf(L_WARN, "%s:     WARNING: Missing '/' at start of additional file '%s' on volume %d, not syncing it.\n", MYNAME, item->name, item->volRef);
             continue;
         }
+        char *lcDir = localRoot(item->volRef);
+        if (!lcDir || createLocalDir(lcDir, ADDITIONAL_FILES))  continue;
         char *fname = strrchr(item->name, '/');
         FileRef fileRef;
-        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0) {
+        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0) { // Backup file ...
             unsigned long attr = 0;
             dlp_VFSFileGetAttributes(sd, fileRef, &attr);
             dlp_VFSFileClose(sd, fileRef);
-            if (attr & vfsFileAttrDirectory) {
-                if (!createDir(lcDir, item->name + 1))
-                    // ToDo: set date !
-                    jp_logf(L_GUI, "%s:      Created local directory '%s'.\n", MYNAME, lcDir);
-            } else {
-                *fname++ = '\0';
-                if (item->name[0] && createDir(lcDir, item->name + 1))  continue;
-                // ToDo: set date !
+            *fname++ = '\0'; // truncate dir part from item->name
+            if (*(item->name) && createLocalDir(lcDir, item->name + 1))  continue;
+            if (attr & vfsFileAttrDirectory)
+                createLocalDir(lcDir, fname);
+            else
                 backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
+        } else { // Restore file ...
+            struct stat fstat;
+            int statErr;
+            if ((statErr = stat(strcat(lcDir, item->name), &fstat))) {
+                piOSErr = piErr == PI_ERR_DLP_PALMOS ? pi_palmos_error(sd) : 0;
+                jp_logf(L_FATAL, "%s:     %sERROR: %d; Could not find remote file '%s' on volume %d to read attributes.\n",
+                        MYNAME, piOSErr ? "PalmOS " : "", piOSErr ? piOSErr : piErr, item->name, item->volRef);
+                jp_logf(L_FATAL, "%s:     ERROR: %d; Could not read status of %s; No sync possible!\n", MYNAME, statErr, lcDir);
+                result = EXIT_FAILURE;
+                continue;
             }
-        } else { // ToDo: restore file
-            jp_logf(L_DEBUG, "%s      WARNING: %d; Cannot open remote file %s on Volume %d\n", MYNAME, piErr, item->name, item->volRef);
-            if (piErr == PI_ERR_DLP_PALMOS)
-                jp_logf(L_FATAL, "%s:        PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
-            }
+            *(strrchr(lcDir, '/')) = '\0'; // truncate from fname again.
+            *(item->name) = *fname = '\0'; // separate parent and child from item->name
+            if (item->name < fname++ && createRemoteDir(item->volRef, item->name, item->name + 1) < 0)  continue;
+            if (S_ISDIR(fstat.st_mode))
+                createRemoteDir(item->volRef, item->name, fname);
+            else
+                restoreFile(lcDir, item->volRef, item->name, fname);
+        }
     }
 
     if (!listFiles || additionalFileList)
-        jp_logf(L_DEBUG, "%s: Sync done -> result=%d\n", MYNAME, result ? result : piErr);
+        jp_logf(L_DEBUG, "%s: Sync done -> result=%d\n", MYNAME, result);
     if (result != EXIT_SUCCESS)
         dlp_AddSyncLogEntry (sd, "Synchronization of Media was incomplete.\n");
     if (importantWarning) {
@@ -300,11 +314,10 @@ Continue:
         jp_logf(L_WARN, "\n%s: IMPORTANT WARNING: Now open once the Media app on your Palm device to avoid crash (signal SIGCHLD) on next HotSync !!!\n\n", MYNAME);
         dlp_AddSyncLogEntry (sd, MYNAME": IMPORTANT WARNING: Now open once the Media app to avoid crash with JPilot on next HotSync !!!\n");
     }
-
     return result;
 }
 
-int plugin_exit_cleanup(void) {
+int plugin_post_sync(void) {
     pi_buffer_free(piBuf);
     pi_buffer_free(piBuf2);
     freePathList(rootDirList);
@@ -313,10 +326,12 @@ int plugin_exit_cleanup(void) {
     freePathList(deleteFileList);
     freePathList(additionalFileList);
     jp_free_prefs(prefs, NUM_PREFS);
+    jp_logf(L_DEBUG, "%s: plugin_post_sync -> done.\n", MYNAME);
     return EXIT_SUCCESS;
 }
 
 // ToDo: Rename picsnvideos ./. media
+// ToDo: Reorder functions
 
 /* Log OOM error on malloc(). */
 static void *mallocLog(size_t size) {
@@ -350,7 +365,7 @@ int parsePaths(char *paths, fullPath **list, char *text) {
             (*list) = NULL;
             return EXIT_FAILURE;
         }
-        jp_logf(L_DEBUG, "%s: Got %s item: dir '%s' on Volume %d\n", MYNAME, text, (*list)->name, (*list)->volRef);
+        jp_logf(L_DEBUG, "%s: Got %s item: '%s' for Volume %d\n", MYNAME, text, (*list)->name, (*list)->volRef);
         if (last == paths)
             break;
     }
@@ -364,25 +379,51 @@ void freePathList(fullPath *list) {
     }
 }
 
-int createDir(char *path, const char *dir) {
+int createLocalDir(char *path, const char *dir) {
     char *subDir = NULL;
     if (dir) {
-        //~ jp_logf(L_DEBUG, "%s:      path='%s', dir='%s'\n", MYNAME, path, dir);
         strcat(strcat(path, "/"), dir);
         if ((subDir = strchr(dir, '/')))
             path[strlen(path) - strlen(subDir)] = '\0';
         //~ jp_logf(L_DEBUG, "%s:      path='%s', dir='%s', subDir='%s'\n", MYNAME, path, dir, subDir);
     }
-    //~ jp_logf(L_DEBUG, "%s:     Before mkdir: path='%s', dir='%s'\n", MYNAME, path, dir);
-    int result;
-    if ((result = mkdir(path, 0777)) && errno != EEXIST) {
-        jp_logf(L_FATAL, "%s:     ERROR: Could not create directory %s\n", MYNAME, path);
+    int result = mkdir(path, 0777);
+    if (!result)
+        jp_logf(L_INFO, "%s:     Created directory '%s'\n", MYNAME, path);
+        // ToDo: set date !
+    else if (errno != EEXIST) {
+        jp_logf(L_FATAL, "%s:     ERROR: %d; Could not create directory %s\n", MYNAME, result, path);
         return result;
     }
-    // ToDo: set date !
     if (subDir++) {
         //~ jp_logf(L_DEBUG, "%s:       Before create: path='%s', dir='%s', subDir+1='%s'\n", MYNAME, path, dir, subDir);
-        return createDir(path, subDir);
+        return createLocalDir(path, subDir);
+    }
+    return EXIT_SUCCESS;
+}
+
+PI_ERR createRemoteDir(const int volRef, char *path, const char *dir) {
+    char *subDir = NULL;
+    if (dir) {
+        strcat(strcat(path, "/"), dir);
+        if ((subDir = strchr(dir, '/')))
+            path[strlen(path) - strlen(subDir)] = '\0';
+        //~ jp_logf(L_DEBUG, "%s:      path='%s', dir='%s', subDir='%s'\n", MYNAME, path, dir, subDir);
+    }
+    PI_ERR piErr = dlp_VFSDirCreate(sd, volRef, path);
+    int piOSErr = piErr == PI_ERR_DLP_PALMOS ? pi_palmos_error(sd) : 0;
+    if (piErr >= 0) {
+        jp_logf(L_INFO, "%s:     Created directory '%s' on volume %d\n", MYNAME, path, volRef);
+        importantWarning = 1;
+        // ToDo: set date !
+    } else if (piOSErr != 10758) { // File not already existing.
+        jp_logf(L_FATAL, "%s:     %sERROR: %d; Could not create dir '%s' on volume %d\n",
+                MYNAME, piOSErr ? "PalmOS " : "", piOSErr ? piOSErr : piErr, path, volRef);
+        return piErr;
+    }
+    if (subDir++) {
+        //~ jp_logf(L_DEBUG, "%s:       Before create: path='%s', dir='%s', subDir+1='%s'\n", MYNAME, path, dir, subDir);
+        return createRemoteDir(volRef, path, subDir);
     }
     return 0;
 }
@@ -397,19 +438,19 @@ static char *localRoot(const unsigned volRef) {
     static char path[NAME_MAX];
     VFSInfo volInfo;
 
-    if (createDir(strcpy(path, lcPath), NULL))  return NULL;
+    if (createLocalDir(strcpy(path, lcPath), NULL))  return NULL;
     // Get indicator of which card.
     if (dlp_VFSVolumeInfo(sd, volRef, &volInfo) < 0) {
         jp_logf(L_FATAL, "%s:     ERROR: Could not get volume info from volRef %d\n", MYNAME, volRef);
         return NULL;
     }
     if (volInfo.mediaType == pi_mktag('T', 'F', 'F', 'S')) {
-        if (createDir(path, LOCALDIRS[0]))  return NULL;
+        if (createLocalDir(path, LOCALDIRS[0]))  return NULL;
     } else if (volInfo.mediaType == pi_mktag('s', 'd', 'i', 'g')) {
-        if (createDir(path, LOCALDIRS[1]))  return NULL;
+        if (createLocalDir(path, LOCALDIRS[1]))  return NULL;
     } else {
         sprintf(path+strlen(path), "/%s%d", LOCALDIRS[2], volInfo.slotRefNum);
-        if (createDir(path, NULL))  return NULL;
+        if (createLocalDir(path, NULL))  return NULL;
     }
     return path; // must not be free'd by caller
 }
@@ -640,7 +681,7 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
         goto Exit;
     }
     // Copy file.
-    jp_logf(L_GUI, "%s:      Backup '%s', size %d ...", MYNAME, rmPath, filesize);
+    jp_logf(L_INFO, "%s:      Backup '%s', size %d ...", MYNAME, rmPath, filesize);
     for (int remaining = filesize; remaining > 0; remaining -= piBuf->used) {
         if (fileRead(fileRef, NULL, piBuf, remaining) < 0)  {
             filesize = -1; // remember error
@@ -656,7 +697,7 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
         unlink(lcPath); // remove the partially created file
         jp_logf(L_WARN, "%s:       WARNING: Deleted incomplete local file '%s'\n", MYNAME, lcPath);
     } else {
-        jp_logf(L_GUI, " OK\n");
+        jp_logf(L_INFO, " OK\n");
         time_t date;
         // Get the date on that the picture was created.
         if (dlp_VFSFileGetDate(sd, fileRef, useDateModified ? vfsFileDateModified : vfsFileDateCreated, &date) < 0) {
@@ -683,7 +724,7 @@ Exit:
 /*
  * Restore a file to the remote Palm device.
  */
-int restoreFile(const unsigned volRef, const char *lcDir, const char *rmDir, const char *file) {
+int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file) {
     char lcPath[strlen(lcDir) + strlen(file) + 2];
     char rmPath[strlen(rmDir) + strlen(file) + 2];
     FILE *fileP;
@@ -724,7 +765,7 @@ int restoreFile(const unsigned volRef, const char *lcDir, const char *rmDir, con
     }
 
     // Copy file.
-    jp_logf(L_GUI, "%s:      Restore '%s', size %d ...", MYNAME, lcPath, filesize);
+    jp_logf(L_INFO, "%s:      Restore '%s', size %d ...", MYNAME, lcPath, filesize);
     for (int remaining = filesize; remaining > 0; remaining -= piBuf->used) {
         if (fileRead(0, fileP, piBuf, remaining) < 0) {
             filesize = -1; // remember error
@@ -744,7 +785,7 @@ int restoreFile(const unsigned volRef, const char *lcDir, const char *rmDir, con
         } else
             jp_logf(L_WARN, "%s:       WARNING: Deleted incomplete remote file '%s' on volume %d\n", MYNAME, rmPath, volRef);
     } else {
-        jp_logf(L_GUI, " OK\n");
+        jp_logf(L_INFO, " OK\n");
         time_t date = fstat.st_mtime;
         // Set both dates of the file (DateCreated is displayed in Media App on Palm device); must not be before 1980, otherwise PalmOS error.
         //~ if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date + 31557384)) < 0 ||
@@ -826,7 +867,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         }
         lcAlbum = strcpy(lcTmp, lcRoot);
         jp_logf(L_DEBUG, "%s:    Try to create dir '%s' in '%s'\n", MYNAME, name, lcRoot);
-        if (createDir(lcAlbum, name)) {
+        if (createLocalDir(lcAlbum, name)) {
             result = -2;
             goto Exit1;
         }
@@ -837,9 +878,9 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
                 goto Exit1;
             }
             time_t date = fstat.st_mtime;
-            // Set the date that the picture was created (not the file), aka modified time.
-            if ((result = dlp_VFSFileSetDate(sd, dirRef, vfsFileDateModified, date)) < 0 ||
-                    (result = dlp_VFSFileSetDate(sd, dirRef, vfsFileDateCreated, date)) < 0) {
+            // Set both dates of the directory; must not be before 1980, otherwise PalmOS error.
+            if ((result = dlp_VFSFileSetDate(sd, dirRef, vfsFileDateCreated, date)) < 0 ||
+                    (result = dlp_VFSFileSetDate(sd, dirRef, vfsFileDateModified, date)) < 0) {
                 jp_logf(L_WARN, "%s:    WARNING: %d; Could not set date of remote file '%s' on volume %d\n", MYNAME, result, rmAlbum, volRef);
                 if (result == PI_ERR_DLP_PALMOS)
                     jp_logf(L_FATAL, "%s:     PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
@@ -856,7 +897,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         lcAlbum = (char *)lcRoot;
         if (!cmpExcludeDirList(volRef, rmAlbum))  return result;
     }
-    jp_logf(L_GUI, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, name ? name : ".", rmRoot, volRef);
+    jp_logf(L_INFO, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, name ? name : ".", rmRoot, volRef);
     if (!dirItems) // We are in backup mode !
         dirItems = enumerateOpenDir(volRef, dirRef, rmAlbum, dirInfos);
     jp_logf(L_DEBUG, "%s:     Now first search of local files, which to restore ...\n", MYNAME);
@@ -875,7 +916,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
                 && casecmpFileTypeList(entry->d_name) > 0
                 && cmpRemote(dirInfos, dirItems, entry->d_name)) {
             //~ jp_logf(L_DEBUG, "%s:      Restore local file: '%s' to '%s'\n", MYNAME, entry->d_name, rmAlbum);
-            int restoreResult = restoreFile(volRef, lcAlbum, rmAlbum, entry->d_name);
+            int restoreResult = restoreFile(lcAlbum, volRef, rmAlbum, entry->d_name);
             result = MIN(result, restoreResult);
         }
     }
