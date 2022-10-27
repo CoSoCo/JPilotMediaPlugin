@@ -109,7 +109,7 @@ static fullPath *deleteFileList = NULL;
 static fullPath *additionalFileList = NULL;
 static pi_buffer_t *piBuf, *piBuf2;
 static int sd; // the central socket descriptor.
-static char lcPath[NAME_MAX];
+static char mediaHome[NAME_MAX];
 static char syncLogEntry[128];
 static int importantWarning = 0;
 
@@ -119,10 +119,15 @@ int parsePaths(char *paths, fullPath **list, char *text);
 void freePathList(fullPath *list);
 int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs);
 int syncVolume(int volRef);
+char *isoTime(const time_t time);
 PI_ERR listRemoteFiles(int volRef, const char *dir, const int indent);
+time_t getLocalDate(const char *path);
+void setLocalDate(const char *path, const time_t date);
+time_t getRemoteDate(const FileRef fileRef, const int volRef, const char *path, const char prefix[]);
+void setRemoteDate(FileRef fileRef, const int volRef, const char *path, const time_t date);
 static char *localRoot(const unsigned volRef);
-int createLocalDir(char *path, const char *dir);
-PI_ERR createRemoteDir(const int volRef, char *path, const char *dir);
+int createLocalDir(char *path, const char *dir, const int volRef, const char *rmPath);
+PI_ERR createRemoteDir(const int volRef, char *path, const char *dir, const char *lcPath);
 int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcDir, const char *file);
 int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file);
 
@@ -199,14 +204,14 @@ int plugin_sync(int socket) {
     }
 
     // Use $JPILOT_HOME/.jpilot/ or current directory for PCDIR.
-    if (jp_get_home_file_name(PCDIR, lcPath, NAME_MAX) < 0) {
+    if (jp_get_home_file_name(PCDIR, mediaHome, NAME_MAX) < 0) {
         jp_logf(L_WARN, "%s: WARNING: Could not get $JPILOT_HOME path, so using current directory.\n", MYNAME);
-        strcpy(lcPath, PCDIR);
+        strcpy(mediaHome, "./"PCDIR); // ToDo: or = "./"PCDIR
     }
     if (listFiles)
         jp_logf(L_INFO, "%s: List all files from the Palm device to the terminal, needs: 'jpilot -d'\n", MYNAME);
     else {
-        jp_logf(L_INFO, "%s: Start syncing with '%s ...'\n", MYNAME, lcPath);
+        jp_logf(L_INFO, "%s: Start syncing with '%s ...'\n", MYNAME, mediaHome);
         // Check if there are any file types loaded.
         if (!fileTypeList) {
             jp_logf(L_FATAL, "%s: ERROR: Could not find any file types from '%s'; No media synced.\n", MYNAME, PREFS_FILE);
@@ -264,27 +269,38 @@ Continue:
 
     // Process additionalFileList ...
     if (additionalFileList)
-        jp_logf(L_INFO, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME/%s ...'\n", MYNAME, lcPath, ADDITIONAL_FILES);
+        jp_logf(L_INFO, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME/%s ...'\n", MYNAME, mediaHome, ADDITIONAL_FILES);
     for (fullPath *item = additionalFileList; item; item = item->next) {
+        jp_logf(L_DEBUG, "%s:  Sync additional file: item->volRef=%d, item->name='%s'\n", MYNAME, item->volRef, item->name);
         if (item->name[0] != '/') {
             jp_logf(L_WARN, "%s:     WARNING: Missing '/' at start of additional file '%s' on volume %d, not syncing it.\n", MYNAME, item->name, item->volRef);
             continue;
         }
         char *lcDir = localRoot(item->volRef);
-        if (!lcDir || createLocalDir(lcDir, ADDITIONAL_FILES))  continue;
+        if (!lcDir || createLocalDir(lcDir, ADDITIONAL_FILES, -1, ""))  continue;
+        //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', getLocalDate(lcDir)='%s'\n", MYNAME, lcDir, isoTime(getLocalDate(lcDir)));
         char *fname = strrchr(item->name, '/');
-        FileRef fileRef;
-        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0) { // Backup file ...
+        FileRef fileRef = 0;
+        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0 && doBackup) { // Backup file ...
+            time_t parentDate = 0; //, date = getRemoteDate(fileRef, item->volRef, item->name, MYNAME":    ");
             unsigned long attr = 0;
             dlp_VFSFileGetAttributes(sd, fileRef, &attr);
             dlp_VFSFileClose(sd, fileRef);
-            *fname++ = '\0'; // truncate dir part from item->name
-            if (*(item->name) && createLocalDir(lcDir, item->name + 1))  continue;
             if (attr & vfsFileAttrDirectory)
-                createLocalDir(lcDir, fname);
-            else
-                backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
-        } else { // Restore file ...
+                createLocalDir(lcDir, item->name + 1, item->volRef, "");
+            else {
+                *fname++ = '\0'; // truncate dir part from item->name
+                //~ jp_logf(L_DEBUG, "%s:     new item->name='%s', fname='%s'\n", MYNAME, item->name, fname);
+                if (!*(item->name) || !createLocalDir(lcDir, item->name + 1, item->volRef, "")) {
+                    parentDate = getLocalDate(lcDir);
+                    backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
+                    //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', parentDate='%s'\n", MYNAME, lcDir, isoTime(parentDate));
+                    if (parentDate)  setLocalDate(lcDir, parentDate); // reset parent dir date. // ToDo: do by BackupFileIfNeeded()
+                }
+            }
+        } else if (!fileRef && doRestore) { // Restore file ...
+            char rmDir[NAME_MAX] = "", lcRoot[NAME_MAX];
+            strcpy(lcRoot, lcDir); // ToDo: maybe not needed, if createRemoteDir() can iterate it.
             struct stat fstat;
             int statErr;
             if ((statErr = stat(strcat(lcDir, item->name), &fstat))) {
@@ -293,16 +309,17 @@ Continue:
                         MYNAME, piOSErr ? "PalmOS " : "", piOSErr ? piOSErr : piErr, item->name, item->volRef);
                 jp_logf(L_FATAL, "%s:     ERROR: %d; Could not read status of %s; No sync possible!\n", MYNAME, statErr, lcDir);
                 result = EXIT_FAILURE;
-                continue;
+            } else if (S_ISDIR(fstat.st_mode))
+                createRemoteDir(item->volRef, rmDir, item->name + 1, lcRoot);
+            else {
+                *fname++ = *(strrchr(lcDir, '/')) = '\0'; // truncate from fname again.
+                if (!*(item->name) || createRemoteDir(item->volRef, rmDir, item->name + 1, lcRoot) >= 0)
+                    restoreFile(lcDir, item->volRef, rmDir, fname);
             }
-            *(strrchr(lcDir, '/')) = '\0'; // truncate from fname again.
-            *(item->name) = *fname = '\0'; // separate parent and child from item->name
-            if (item->name < fname++ && createRemoteDir(item->volRef, item->name, item->name + 1) < 0)  continue;
-            if (S_ISDIR(fstat.st_mode))
-                createRemoteDir(item->volRef, item->name, fname);
-            else
-                restoreFile(lcDir, item->volRef, item->name, fname);
+        } else if (doRestore) {
+            jp_logf(L_WARN, "%s:     WARNING: Remote file '%s' on volume %d already exists. To replace, first delete it.\n", MYNAME, item->name, item->volRef);
         }
+        if (fileRef)  dlp_VFSFileClose(sd, fileRef);
     }
 
     if (!listFiles || additionalFileList)
@@ -325,7 +342,7 @@ int plugin_post_sync(void) {
     freePathList(excludeDirList);
     freePathList(deleteFileList);
     freePathList(additionalFileList);
-    jp_free_prefs(prefs, NUM_PREFS);
+    jp_free_prefs(prefs, NUM_PREFS); // Calling this in plugin_exit_cleanup() causes crash from free().
     jp_logf(L_DEBUG, "%s: plugin_post_sync -> done.\n", MYNAME);
     return EXIT_SUCCESS;
 }
@@ -343,7 +360,7 @@ static void *mallocLog(size_t size) {
 
 int parsePaths(char *paths, fullPath **list, char *text) {
     for (char *last; *paths != '\0'; *--last = '\0') {
-        if (*(last = (last = strrchr(paths, ':')) ? last + 1 : paths) == '\0') {
+        if (!*(last = (last = strrchr(paths, ':')) ? last + 1 : paths)) {
             jp_logf(L_WARN, "%s: WARNING: Empty name in %s.\n", MYNAME, text);
             continue;
         }
@@ -379,51 +396,134 @@ void freePathList(fullPath *list) {
     }
 }
 
-int createLocalDir(char *path, const char *dir) {
-    char *subDir = NULL;
-    if (dir) {
-        strcat(strcat(path, "/"), dir);
-        if ((subDir = strchr(dir, '/')))
-            path[strlen(path) - strlen(subDir)] = '\0';
-        //~ jp_logf(L_DEBUG, "%s:      path='%s', dir='%s', subDir='%s'\n", MYNAME, path, dir, subDir);
+time_t getLocalDate(const char *path) {
+    struct stat fstat;
+    int statErr = stat(path, &fstat);
+    if (statErr) {
+        jp_logf(L_WARN, "%s:       WARNING: Could not get date of file '%s', statErr=%d\n", MYNAME, path, statErr);
+        return 0;
     }
+    return fstat.st_mtime;
+}
+
+void setLocalDate(const char *path, const time_t date) {
+    struct stat fstat;
+    int statErr = stat(path, &fstat);
+    if ((statErr = stat(path, &fstat)))
+        jp_logf(L_WARN, "%s:       WARNING: Could not set date of file '%s', statErr=%d\n", MYNAME, path, statErr);
+    else {
+        struct utimbuf utim;
+        utim.actime = (time_t)fstat.st_atime;
+        utim.modtime = date;
+        statErr = utime(path, &utim);
+        jp_logf(L_DEBUG, "%s:       setLocalDate(path='%s', date='%s') ---> done!\n", MYNAME, path, isoTime(date));
+    }
+}
+
+time_t getRemoteDate(FileRef fileRef, const int volRef, const char *path, const char prefix[]) {
+    time_t date = 0;
+    int close = !fileRef && dlp_VFSFileOpen(sd, volRef, path, vfsModeRead, &fileRef) >= 0;
+    // 'date modified' seems to be ignored by PalmOS
+    if (!fileRef || dlp_VFSFileGetDate(sd, fileRef, useDateModified ? vfsFileDateModified : vfsFileDateCreated, &date) < 0) {
+        jp_logf(volRef ? L_WARN:L_DEBUG, "%s WARNING: %s 'date %s ", prefix, volRef ? "Cannot get":"No", useDateModified ? "modified'":"created' ");
+        jp_logf(volRef ? L_WARN:L_DEBUG, volRef ? "of file '%s' on volume %d\n":"from   %s\n", path, volRef);
+    }   // the message variant without volRef is for listRemoteFiles()
+    if (close)  dlp_VFSFileClose(sd, fileRef);
+    return date;
+}
+
+void setRemoteDate(FileRef fileRef, const int volRef, const char *path, const time_t date) {
+    PI_ERR piErr;
+    int close = !fileRef && dlp_VFSFileOpen(sd, volRef, path, vfsModeReadWrite, &fileRef) >= 0;
+    // Set both dates of the file (DateCreated is displayed in Media App on Palm device); must not be before 1980, otherwise PalmOS error.
+    if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date)) < 0) { // ToDo: do both as for loop
+        jp_logf(L_WARN, "%s:      WARNING: %d Could not set created date of remote file '%s' on volume %d\n", MYNAME, piErr, path, volRef);
+        if (piErr == PI_ERR_DLP_PALMOS)
+            jp_logf(L_FATAL, "%s:       PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
+    }
+    if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateModified, date)) < 0) { // but modified date seems to be ignored
+        jp_logf(L_WARN, "%s:      WARNING: %d Could not set modified date of remote file '%s' on volume %d\n", MYNAME, piErr, path, volRef);
+        if (piErr == PI_ERR_DLP_PALMOS)
+            jp_logf(L_FATAL, "%s:       PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
+    }
+    if (close)  dlp_VFSFileClose(sd, fileRef);
+}
+
+/*
+ * If *dir is non-NULL, *path should be existent and start with "/" or "./".
+ * If *dir is NULL, only the last element of *path may be be non-existent and should start with "/" or "./".
+ * If *rmPath should be in sync with *path.
+ * *path becomes extended by *dir as successfully created.
+ * EXIT_SUCCESS is returned on success, otherwise EXIT_FAILURE.
+ * Caller should allocate and free *path value.
+ */
+int createLocalDir(char *path, const char *dir, const int volRef, const char *rmPath) {
+    jp_logf(L_DEBUG, "%s:     createLocalDir(path='%s', dir='%s', volRef=%d, rmPath='%s')\n", MYNAME, path, dir, volRef, rmPath);
+    char *pathBase = path + strlen(path), *subDir = NULL, parent[NAME_MAX], rmDir[NAME_MAX];
+    strcpy(parent, path);
+
+    if (dir) {
+        stpcpy(stpcpy(pathBase, "/"), dir);
+        if ((subDir = strchr(pathBase + 1, '/')))
+            *subDir++ = '\0';
+    } else if ((dir = strrchr(path, '/'))) {
+        parent[dir - path] = '\0';
+    } else {
+        strcpy(parent, "."); // ToDo: in this case do not reset parent's date
+    }
+    stpcpy(stpcpy(rmDir, rmPath), pathBase);
+    time_t parentDate = strcmp(parent, ".") && strcmp(strrchr(parent, '/') + 1, ADDITIONAL_FILES) ? getLocalDate(parent) : 0;
+    jp_logf(L_DEBUG, "%s:     path='%s', subDir='%s', parent='%s', parentDate='%s', rmDir='%s'\n", MYNAME, path, subDir, parent, isoTime(parentDate), rmDir);
     int result = mkdir(path, 0777);
-    if (!result)
+    if (!result) {
         jp_logf(L_INFO, "%s:     Created directory '%s'\n", MYNAME, path);
-        // ToDo: set date !
-    else if (errno != EEXIST) {
-        jp_logf(L_FATAL, "%s:     ERROR: %d; Could not create directory %s\n", MYNAME, result, path);
+        if (parentDate)  setLocalDate(parent, parentDate); // Reset date of parent path, because mkdir() changed it. // ToDo: maybe do always, at least for lcRoot
+    } else if (errno != EEXIST) {
+        jp_logf(L_FATAL, "%s:     ERROR: %d; Could not create directory %s\n", MYNAME, errno, path);
+        *(strrchr(path, '/')) = '\0'; // truncate *path
         return result;
     }
-    if (subDir++) {
-        //~ jp_logf(L_DEBUG, "%s:       Before create: path='%s', dir='%s', subDir+1='%s'\n", MYNAME, path, dir, subDir);
-        return createLocalDir(path, subDir);
+    time_t date = volRef >= 0 && rmDir[0] ? getRemoteDate(0, volRef, rmDir, MYNAME":    ") : 0;
+    //~ jp_logf(L_DEBUG, "%s:     path='%s', date='%s', volRef=%d, rmDir='%s'\n", MYNAME, path, isoTime(date), volRef, rmDir);
+    if (date)  setLocalDate(path, date);
+    if (subDir) {
+        return createLocalDir(path, subDir, volRef, rmDir);
     }
     return EXIT_SUCCESS;
 }
 
-PI_ERR createRemoteDir(const int volRef, char *path, const char *dir) {
-    char *subDir = NULL;
+/*
+ * If *path should be existent and start with '/'.
+ * If not, dir should be existent.
+ * If *lcPath should be in sync with *path.
+ * *path becomes extended by *dir as successfully created.
+ * 0 is returned on success, otherwise negative PI_ERR.
+ * Caller should allocate and free *path value.
+ */
+PI_ERR createRemoteDir(const int volRef, char *path, const char *dir, const char *lcPath) {
+    jp_logf(L_DEBUG, "%s:     createRemoteDir(volRef=%d, path='%s', dir='%s', lcPath='%s')\n", MYNAME, volRef, path, dir, lcPath);
+    char *pathBase = path + strlen(path), *subDir = NULL, lcDir[NAME_MAX];
     if (dir) {
-        strcat(strcat(path, "/"), dir);
-        if ((subDir = strchr(dir, '/')))
-            path[strlen(path) - strlen(subDir)] = '\0';
-        //~ jp_logf(L_DEBUG, "%s:      path='%s', dir='%s', subDir='%s'\n", MYNAME, path, dir, subDir);
+        stpcpy(stpcpy(pathBase, "/"), dir);
+        if ((subDir = strchr(pathBase + 1, '/')))
+            *subDir++ = '\0';
     }
     PI_ERR piErr = dlp_VFSDirCreate(sd, volRef, path);
     int piOSErr = piErr == PI_ERR_DLP_PALMOS ? pi_palmos_error(sd) : 0;
     if (piErr >= 0) {
         jp_logf(L_INFO, "%s:     Created directory '%s' on volume %d\n", MYNAME, path, volRef);
         importantWarning = 1;
-        // ToDo: set date !
+        stpcpy(stpcpy(lcDir, lcPath), pathBase);
+        time_t date = getLocalDate(lcDir);
+        if (date)  setRemoteDate(0, volRef, path, date); // only set remote dir date, if really created
     } else if (piOSErr != 10758) { // File not already existing.
         jp_logf(L_FATAL, "%s:     %sERROR: %d; Could not create dir '%s' on volume %d\n",
                 MYNAME, piOSErr ? "PalmOS " : "", piOSErr ? piOSErr : piErr, path, volRef);
+        *(strrchr(path, '/')) = '\0'; // truncate *path
         return piErr;
     }
-    if (subDir++) {
-        //~ jp_logf(L_DEBUG, "%s:       Before create: path='%s', dir='%s', subDir+1='%s'\n", MYNAME, path, dir, subDir);
-        return createRemoteDir(volRef, path, subDir);
+    if (subDir) {
+        return createRemoteDir(volRef, path, subDir, lcDir);
     }
     return 0;
 }
@@ -438,24 +538,24 @@ static char *localRoot(const unsigned volRef) {
     static char path[NAME_MAX];
     VFSInfo volInfo;
 
-    if (createLocalDir(strcpy(path, lcPath), NULL))  return NULL;
+    if (createLocalDir(strcpy(path, mediaHome), NULL, -1, ""))  return NULL;
     // Get indicator of which card.
     if (dlp_VFSVolumeInfo(sd, volRef, &volInfo) < 0) {
         jp_logf(L_FATAL, "%s:     ERROR: Could not get volume info from volRef %d\n", MYNAME, volRef);
         return NULL;
     }
     if (volInfo.mediaType == pi_mktag('T', 'F', 'F', 'S')) {
-        if (createLocalDir(path, LOCALDIRS[0]))  return NULL;
+        if (createLocalDir(path, LOCALDIRS[0], -1, ""))  return NULL;
     } else if (volInfo.mediaType == pi_mktag('s', 'd', 'i', 'g')) {
-        if (createLocalDir(path, LOCALDIRS[1]))  return NULL;
+        if (createLocalDir(path, LOCALDIRS[1], -1, ""))  return NULL;
     } else {
         sprintf(path+strlen(path), "/%s%d", LOCALDIRS[2], volInfo.slotRefNum);
-        if (createLocalDir(path, NULL))  return NULL;
+        if (createLocalDir(path, NULL, -1, ""))  return NULL;
     }
-    return path; // must not be free'd by caller
+    return path; // must not be free'd by caller as it's a static array
 }
 
-int enumerateOpenDir(const int volRef, FileRef dirRef, const char *rmDir, VFSDirInfo dirInfos[]) {
+int enumerateOpenDir(const int volRef, const FileRef dirRef, const char *rmDir, VFSDirInfo dirInfos[]) {
     int dirItems_init = MIN_DIR_ITEMS, dirItems;
     PI_ERR piErr;
 
@@ -514,27 +614,26 @@ int cmpExcludeDirList(const int volRef, const char *dname) {
     return result;
 }
 
-char *isoTime(const time_t *time) {
+char *isoTime(const time_t time) {
     static char isoTime[20];
-    strftime(isoTime, 20, "%F %T", localtime (time));
+    strftime(isoTime, 20, "%F %T", localtime (&time));
     return isoTime;
 }
 
-/* List root directories for developing purposes. */
+/* List remote files and directories recursivly up to given depth. */
 PI_ERR listRemoteFiles(const int volRef, const char *rmDir, const int depth) {
     FileRef fileRef;
     VFSDirInfo dirInfos[MAX_DIR_ITEMS];
     char prefix[] = MYNAME":                 ";
-    prefix[MIN(sizeof(prefix) - 1, strlen(MYNAME) + 2 + depth)] = '\0';
 
+    prefix[MIN(sizeof(prefix) - 1, strlen(MYNAME) + 1 + depth)] = '\0';
     if (!cmpExcludeDirList(volRef, rmDir))  return -1; // avoid bug <https://github.com/desrod/pilot-link/issues/11>
     int dirItems = enumerateDir(volRef, rmDir, dirInfos);
     jp_logf(L_DEBUG, "%s%d remote files in '%s' on Volume %d ...\n", prefix, dirItems, rmDir, volRef);
     for (int i = 0; i < dirItems; i++) {
         char child[NAME_MAX];
         int filesize = 0;
-        //~ time_t dateCre = 0, dateMod = 0;
-        time_t dateCre = 0;
+        time_t date = 0;
 
         strncat(strncat(strcpy(child, strcmp(rmDir, "/") ? rmDir : ""), "/", NAME_MAX-1), dirInfos[i].name, NAME_MAX-1);
         //~ strncat(strcmp(rmDir, "/") ? strncat(strcat(child, rmDir), "/", NAME_MAX-1) : child, dirInfos[i].name, NAME_MAX-1); // for paths without '/' at start
@@ -543,19 +642,15 @@ PI_ERR listRemoteFiles(const int volRef, const char *rmDir, const int depth) {
         } else {
             if (!(dirInfos[i].attr & vfsFileAttrDirectory) && (dlp_VFSFileSize(sd, fileRef, &filesize) < 0))
                 jp_logf(L_DEBUG, "%s WARNING: Could not get size of     %s\n", prefix, dirInfos[i].name);
-            if (dlp_VFSFileGetDate(sd, fileRef, vfsFileDateCreated, &dateCre) < 0)
-                jp_logf(L_DEBUG, "%s WARNING: No 'date created' from    %s\n", prefix, dirInfos[i].name);
-            //~ if (dlp_VFSFileGetDate(sd, fileRef, vfsFileDateModified, &dateMod) < 0) // seems to be ignored by Palm
-                //~ jp_logf(L_WARN, "%s WARNING: No 'date modified' from   %s\n", prefix, dirInfos[i].name);
+            date = getRemoteDate(fileRef, 0, dirInfos[i].name, prefix);
             dlp_VFSFileClose(sd, fileRef);
         }
         //~ jp_logf(L_DEBUG, "%s 0x%02x%10d %s %s %s\n", prefix, dirInfos[i].attr, filesize, isoTime(&dateCre), isoTime(&dateMod), dirInfos[i].name);
-        jp_logf(L_DEBUG, "%s 0x%02x%10d %s %s\n", prefix, dirInfos[i].attr, filesize, isoTime(&dateCre), dirInfos[i].name);
+        jp_logf(L_DEBUG, "%s 0x%02x%10d %s %s\n", prefix, dirInfos[i].attr, filesize, isoTime(date), dirInfos[i].name);
         if (dirInfos[i].attr & vfsFileAttrDirectory && depth < listFiles) {
             listRemoteFiles(volRef, child, depth + 1);
         }
     }
-    //~ jp_logf(L_DEBUG, "%sList remote files in '%s' on volume %d done -> dirItems=%d\n", prefix, rmDir, volRef, dirItems);
     return (PI_ERR)dirItems;
 }
 
@@ -616,6 +711,7 @@ int fileCompare(FileRef fileRef, FILE *fileP, int filesize) {
  * Backup a file from the Palm device, if not existent or different.
  */
 int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcDir, const char *file) {
+    jp_logf(L_DEBUG, "%s:      backupFileIfNeeded(volRef=%d, rmDir='%s', lcDir='%s', file='%s')\n", MYNAME, volRef, rmDir, lcDir, file);
     char rmPath[strlen(rmDir) + strlen(file) + 2];
     char lcPath[strlen(lcDir) + strlen(file) + 4]; // prepare for possible rename
     FileRef fileRef;
@@ -698,22 +794,9 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
         jp_logf(L_WARN, "%s:       WARNING: Deleted incomplete local file '%s'\n", MYNAME, lcPath);
     } else {
         jp_logf(L_INFO, " OK\n");
-        time_t date;
         // Get the date on that the picture was created.
-        if (dlp_VFSFileGetDate(sd, fileRef, useDateModified ? vfsFileDateModified : vfsFileDateCreated, &date) < 0) {
-            jp_logf(L_WARN, "%s:       WARNING: Cannot get date of file '%s' on volume %d\n", MYNAME, rmPath, volRef);
-            statErr = 0; // reset old state
-        // And set the destination file modified time to that date.
-        } else if (!(statErr = stat(lcPath, &fstat))) {
-            //jp_logf(L_DEBUG, "%s:       modified: %s", MYNAME, ctime(&date));
-            struct utimbuf utim;
-            utim.actime = (time_t)fstat.st_atime;
-            utim.modtime = date;
-            statErr = utime(lcPath, &utim);
-        }
-        if (statErr) {
-            jp_logf(L_WARN, "%s:       WARNING: Could not set date of file '%s', ErrCode=%d\n", MYNAME, lcPath, statErr);
-        }
+        time_t date = getRemoteDate(fileRef, volRef, rmPath, MYNAME":      ");
+        if (date)  setLocalDate(lcPath, date);
     }
 Exit:
     dlp_VFSFileClose(sd, fileRef);
@@ -725,6 +808,7 @@ Exit:
  * Restore a file to the remote Palm device.
  */
 int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file) {
+    jp_logf(L_DEBUG, "%s:      backupFileIfNeeded(lcDir='%s', volRef=%d, rmDir='%s', file='%s')\n", MYNAME, lcDir, volRef, rmDir, file);
     char lcPath[strlen(lcDir) + strlen(file) + 2];
     char rmPath[strlen(rmDir) + strlen(file) + 2];
     FILE *fileP;
@@ -787,24 +871,7 @@ int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, con
     } else {
         jp_logf(L_INFO, " OK\n");
         time_t date = fstat.st_mtime;
-        // Set both dates of the file (DateCreated is displayed in Media App on Palm device); must not be before 1980, otherwise PalmOS error.
-        //~ if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date + 31557384)) < 0 ||
-        //~ if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date)) < 0 ||
-                //~ (piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateModified, date)) < 0) {
-            //~ jp_logf(L_WARN, "%s:      WARNING: %d Could not set date of remote file '%s' on volume %d\n", MYNAME, piErr, rmPath, volRef);
-            //~ if (piErr == PI_ERR_DLP_PALMOS)
-                //~ jp_logf(L_FATAL, "%s:       PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
-        //~ }
-        if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateCreated, date)) < 0) {
-            jp_logf(L_WARN, "%s:      WARNING: %d Could not set created date of remote file '%s' on volume %d\n", MYNAME, piErr, rmPath, volRef);
-            if (piErr == PI_ERR_DLP_PALMOS)
-                jp_logf(L_FATAL, "%s:       PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
-        }
-        if ((piErr = dlp_VFSFileSetDate(sd, fileRef, vfsFileDateModified, date)) < 0) { // but modified date seems to be ignored
-            jp_logf(L_WARN, "%s:      WARNING: %d Could not set modified date of remote file '%s' on volume %d\n", MYNAME, piErr, rmPath, volRef);
-            if (piErr == PI_ERR_DLP_PALMOS)
-                jp_logf(L_FATAL, "%s:       PalmOS ERROR: %d\n", MYNAME, pi_palmos_error(sd));
-        }
+        setRemoteDate(fileRef, volRef, rmPath, date);
     }
     dlp_VFSFileClose(sd, fileRef);
 
@@ -851,11 +918,11 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         if (!cmpExcludeDirList(volRef, rmAlbum))  return result;
         if (dirP) { // indicates, that we are in restore-only mode, so need to create a new remote album dir.
             jp_logf(L_DEBUG, "%s:    Try to create dir '%s' on volume %d\n", MYNAME, rmAlbum, volRef);
-            if ((result = dlp_VFSDirCreate(sd, volRef, rmAlbum)) >= 0) {
+            if ((result = dlp_VFSDirCreate(sd, volRef, rmAlbum)) >= 0) { // ToDo: use createRemoteDir()
                 importantWarning = 1;
             } else if (result == PI_ERR_DLP_PALMOS && (piOSErr = pi_palmos_error(sd)) != 10758) { // File not already existing.
                 jp_logf(L_FATAL, "%s:    ERROR: %d; Could not create dir '%s' on volume %d\n", MYNAME, result, rmAlbum, volRef);
-                jp_logf(L_FATAL, "%s:     PalmOS ERROR: %d\n", MYNAME, piOSErr);
+                jp_logf(L_FATAL, "%s:     PalmOS ERROR: %d\n", MYNAME, piOSErr); // ToDo: log in one line
                 return -2;
             }
             dirItems = -1; // prevent search on remote album
@@ -867,7 +934,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         }
         lcAlbum = strcpy(lcTmp, lcRoot);
         jp_logf(L_DEBUG, "%s:    Try to create dir '%s' in '%s'\n", MYNAME, name, lcRoot);
-        if (createLocalDir(lcAlbum, name)) {
+        if (createLocalDir(lcAlbum, name, volRef, rmRoot)) {
             result = -2;
             goto Exit1;
         }
@@ -940,6 +1007,8 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
             result = MIN(result, backupResult);
         }
     }
+    time_t date = getRemoteDate(dirRef, volRef, rmAlbum, MYNAME":    ");
+    if (doBackup && date)  setLocalDate(lcAlbum, date); // always reset folder date from remote // ToDo: do by BackupFileIfNeeded()
     if (name)  closedir(dirP);
     else  rewinddir(dirP);
 Exit1:
@@ -967,7 +1036,7 @@ PI_ERR syncVolume(int volRef) {
             jp_logf(L_DEBUG, "%s:   Root '%s' does not exist on volume %d\n", MYNAME, rootDir, volRef);
             continue;
         }
-        jp_logf(L_DEBUG, "%s:   Opened root '%s' on volume %d\n", MYNAME, rootDir, volRef);
+        jp_logf(L_DEBUG, "%s:   Opened remote root '%s' on volume %d\n", MYNAME, rootDir, volRef);
         rootResult = 0;
 
         // Open the local root directory.
@@ -976,10 +1045,10 @@ PI_ERR syncVolume(int volRef) {
             goto Continue;
         DIR *dirP;
         if (!(dirP = opendir(lcRoot))) {
-            jp_logf(L_DEBUG, "%s:   Root '%s' does not exist on '%s'\n", MYNAME, lcRoot + strlen(lcPath) + 1, lcPath);
+            jp_logf(L_DEBUG, "%s:   Root '%s' does not exist on '%s'\n", MYNAME, lcRoot + strlen(mediaHome), mediaHome);
             goto Continue;
         }
-        jp_logf(L_DEBUG, "%s:   Opened local root '%s' on '%s'\n", MYNAME, lcRoot + strlen(lcPath) + 1, lcPath);
+        jp_logf(L_DEBUG, "%s:   Opened local root '%s' on '%s'\n", MYNAME, lcRoot + strlen(mediaHome), mediaHome);
 
         // Fetch the unfiled album, which is simply the root dir, and sync it.
         // Apparently the Treo 650 can store media in the root dir, as well as in album dirs.
@@ -1022,7 +1091,7 @@ PI_ERR syncVolume(int volRef) {
         // only looking for remotely unknown albums ... and then restore them.
         jp_logf(L_DEBUG, "%s:   Now search for local albums in '%s' to restore ...\n", MYNAME, lcRoot);
         for (struct dirent *entry; (entry = readdir(dirP));) {
-            jp_logf(L_DEBUG, "%s:    Found local album candidate '%s' in '%s'; type %d\n", MYNAME, entry->d_name, lcRoot + strlen(lcPath) + 1, entry->d_type);
+            jp_logf(L_DEBUG, "%s:    Found local album candidate '%s' in '%s'; type %d\n", MYNAME, entry->d_name, lcRoot + strlen(mediaHome) + 1, entry->d_type);
             struct stat fstat;
             int statErr;
             char lcAlbum[NAME_MAX];
@@ -1037,13 +1106,16 @@ PI_ERR syncVolume(int volRef) {
                     && (syncThumbnailDir || strcmp(entry->d_name, "#Thumbnail")) // Treo 650 has #Thumbnail dir that is not an album
                     && strcmp(entry->d_name, ADDITIONAL_FILES)
                     && cmpRemote(dirInfos, dirItems, entry->d_name)) {
-                jp_logf(L_DEBUG, "%s:    Found real local album '%s' in '%s'\n", MYNAME, entry->d_name, lcRoot + strlen(lcPath) + 1);
+                jp_logf(L_DEBUG, "%s:    Found real local album '%s' in '%s'\n", MYNAME, entry->d_name, lcRoot + strlen(mediaHome) + 1);
                 PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, dirP, lcRoot, entry->d_name);
                 result = MIN(result, albumResult);
             }
         }
 
         closedir(dirP);
+        // Reset date of lcRoot
+        time_t date = getRemoteDate(dirRef, volRef, rootDir, MYNAME":  ");
+        if (date)  setLocalDate(lcRoot, date);
 Continue:
         dlp_VFSFileClose(sd, dirRef);
     }

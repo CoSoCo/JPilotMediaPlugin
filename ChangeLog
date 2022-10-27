@@ -7,6 +7,7 @@ Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Added prefsVersion. Define rootDirs by pref.
 * New pref to process additional files.
 * New pref to delete single files.
+* Sync timestamps of folders.
 
 Version 0.4.2   Sept 15, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
