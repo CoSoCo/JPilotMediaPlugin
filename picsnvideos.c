@@ -39,7 +39,7 @@
 #define MYNAME PACKAGE_NAME
 #define PCDIR "Media"
 #define PREFS_VERSION 3
-#define ADDITIONAL_FILES "#AdditionalFiles"
+#define ADDITIONAL_FILES "/#AdditionalFiles"
 
 #define L_DEBUG JP_LOG_DEBUG
 #define L_INFO  JP_LOG_WARN // JP_LOG_INFO unfortunately doesn't show up in GUI, so use JP_LOG_WARN.
@@ -101,7 +101,7 @@ static char *additionalFiles; // becomes freed by jp_free_prefs()
 static const unsigned MAX_VOLUMES = 16;
 static const unsigned MIN_DIR_ITEMS = 2;
 static const unsigned MAX_DIR_ITEMS = 1024;
-static const char *LOCALDIRS[] = {"Internal", "SDCard", "Card"}; // ToDo: use with '/'
+static const char *LOCALDIRS[] = {"/Internal", "/SDCard", "/Card"};
 static fullPath *rootDirList = NULL;
 static fullPath *fileTypeList = NULL;
 static fullPath *excludeDirList = NULL;
@@ -134,7 +134,6 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
 int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file);
 
 // ToDo: replace strcat() by stpcpy()
-// ToDo: do not expect and work with starting '/' on file paths
 
 void plugin_version(int *major_version, int *minor_version) {
     *major_version = 0;
@@ -264,7 +263,7 @@ Continue:
 
     // Process additionalFileList ...
     if (additionalFileList)
-        jp_logf(L_INFO, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME/%s ...'\n", MYNAME, mediaHome, ADDITIONAL_FILES);
+        jp_logf(L_INFO, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME%s ...'\n", MYNAME, mediaHome, ADDITIONAL_FILES);
     for (fullPath *item = additionalFileList; item; item = item->next) {
         jp_logf(L_DEBUG, "%s:  Sync additional file: item->volRef=%d, item->name='%s'\n", MYNAME, item->volRef, item->name);
         if (item->name[0] != '/') {
@@ -282,11 +281,11 @@ Continue:
             dlp_VFSFileGetAttributes(sd, fileRef, &attr);
             dlp_VFSFileClose(sd, fileRef);
             if (attr & vfsFileAttrDirectory)
-                createLocalDir(lcDir, item->name + 1, item->volRef, "");
+                createLocalDir(lcDir, item->name, item->volRef, "");
             else {
                 *fname++ = '\0'; // truncate dir part from item->name
                 //~ jp_logf(L_DEBUG, "%s:     new item->name='%s', fname='%s'\n", MYNAME, item->name, fname);
-                if (!*(item->name) || !createLocalDir(lcDir, item->name + 1, item->volRef, "")) {
+                if (!*(item->name) || !createLocalDir(lcDir, item->name, item->volRef, "")) {
                     parentDate = getLocalDate(lcDir);
                     backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
                     //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', parentDate='%s'\n", MYNAME, lcDir, isoTime(parentDate));
@@ -303,10 +302,10 @@ Continue:
                 jp_logf(L_FATAL, "%s:     ERROR %d: Could not read status of '%s'; No sync possible!\n", MYNAME, statErr, lcDir);
                 result = EXIT_FAILURE;
             } else if (S_ISDIR(fstat.st_mode))
-                createRemoteDir(item->volRef, rmDir, item->name + 1, lcRoot);
+                createRemoteDir(item->volRef, rmDir, item->name, lcRoot);
             else {
                 *fname++ = *(strrchr(lcDir, '/')) = '\0'; // truncate from fname again.
-                if (!*(item->name) || createRemoteDir(item->volRef, rmDir, item->name + 1, lcRoot) >= 0)
+                if (!*(item->name) || createRemoteDir(item->volRef, rmDir, item->name, lcRoot) >= 0)
                     restoreFile(lcDir, item->volRef, rmDir, fname);
             }
         } else if (doRestore) {
@@ -459,10 +458,10 @@ void setRemoteDate(FileRef fileRef, const int volRef, const char *path, const ti
 }
 
 /*
- * If *dir is non-NULL, *path should be already existent and start with "/" or "./".
- * If *dir is NULL, only the last element of *path may be non-existent and should start with "/" or "./".
- * If *rmPath should be in sync with *path.
  * *path becomes extended by *dir as successfully created.
+ * If *dir is non-NULL, it should start with "/" and *path should be already existent and start with "/" or "./".
+ * If *dir is NULL, only the last element of *path may be non-existent and *path should start with "/" or "./".
+ * If *rmPath should be in sync with *path.
  * EXIT_SUCCESS is returned on success, otherwise EXIT_FAILURE.
  * Caller should allocate and free *path value.
  */
@@ -472,16 +471,16 @@ int createLocalDir(char *path, const char *dir, const int volRef, const char *rm
     strcpy(parent, path);
 
     if (dir) {
-        stpcpy(stpcpy(pathBase, "/"), dir);
-        if ((subDir = strchr(pathBase + 1, '/')))
-            *subDir++ = '\0';
+        stpcpy(pathBase, dir);
+        if ((subDir = strchr(dir + 1, '/')))
+            *(strchr(pathBase + 1, '/')) = '\0';
     } else if ((dir = strrchr(path, '/'))) {
         parent[dir - path] = '\0';
     } else {
         strcpy(parent, "."); // ToDo: in this case do not reset parent's date
     }
     stpcpy(stpcpy(rmDir, rmPath), pathBase);
-    time_t parentDate = strcmp(parent, ".") && strcmp(strrchr(parent, '/') + 1, ADDITIONAL_FILES) ? getLocalDate(parent) : 0; // skip in case
+    time_t parentDate = strcmp(parent, ".") && strcmp(strrchr(parent, '/'), ADDITIONAL_FILES) ? getLocalDate(parent) : 0; // skip in case
     jp_logf(L_DEBUG, "%s:     path='%s', subDir='%s', parent='%s', parentDate='%s', rmDir='%s'\n", MYNAME, path, subDir, parent, isoTime(parentDate), rmDir);
     int result = mkdir(path, 0777);
     if (!result) {
@@ -502,10 +501,10 @@ int createLocalDir(char *path, const char *dir, const int volRef, const char *rm
 }
 
 /*
- * If *dir is non-NULL, *path should be already existent.
- * If *dir is NULL, only the last element of *path may be non-existent and should start with "/".
- * If *lcPath should be in sync with *path.
  * *path becomes extended by *dir as successfully created.
+ * If *dir is non-NULL, it should start with "/" and *path should be already existent and start with "/".
+ * If *dir is NULL, only the last element of *path may be non-existent and *path should start with "/".
+ * If *lcPath should be in sync with *path.
  * 0 is returned on success, otherwise negative PI_ERR.
  * Caller should allocate and free *path value.
  */
@@ -513,9 +512,9 @@ PI_ERR createRemoteDir(const int volRef, char *path, const char *dir, const char
     jp_logf(L_DEBUG, "%s:     createRemoteDir(volRef=%d, path='%s', dir='%s', lcPath='%s')\n", MYNAME, volRef, path, dir, lcPath);
     char *pathBase = path + strlen(path), *subDir = NULL, lcDir[NAME_MAX];
     if (dir) {
-        stpcpy(stpcpy(pathBase, "/"), dir);
-        if ((subDir = strchr(pathBase + 1, '/')))
-            *subDir++ = '\0';
+        stpcpy(pathBase, dir);
+        if ((subDir = strchr(dir + 1, '/')))
+            *(strchr(pathBase + 1, '/')) = '\0';
     }
     stpcpy(stpcpy(lcDir, lcPath), pathBase);
     PI_ERR piErr = dlp_VFSDirCreate(sd, volRef, path);
@@ -558,7 +557,7 @@ static char *localRoot(const unsigned volRef) {
     } else if (volInfo.mediaType == pi_mktag('s', 'd', 'i', 'g')) {
         if (createLocalDir(path, LOCALDIRS[1], -1, ""))  return NULL;
     } else {
-        sprintf(path+strlen(path), "/%s%d", LOCALDIRS[2], volInfo.slotRefNum);
+        sprintf(path+strlen(path), "%s%d", LOCALDIRS[2], volInfo.slotRefNum);
         if (createLocalDir(path, NULL, -1, ""))  return NULL;
     }
     return path; // must not be free'd by caller as it's a static array
@@ -901,7 +900,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         if (dirP) // indicates, that we are in restore-only mode, so
             dirItems = -1; // prevent search on remote album
         lcAlbum = strcpy(lcTmp, lcRoot);
-        if (createLocalDir(lcAlbum, name, dirP ? -1 : volRef, rmRoot)) { // in restore-only mode don't try to recover date
+        if (createLocalDir(lcAlbum, rmAlbum + strlen(rmRoot), dirP ? -1 : volRef, rmRoot)) { // in restore-only mode don't try to recover date
             return -2;
         } else if (!(dirP = opendir(lcAlbum))) {
             jp_logf(L_FATAL, "%s:    ERROR: Could not open dir '%s' on '%s'\n", MYNAME, name, lcRoot);
@@ -1033,8 +1032,7 @@ PI_ERR syncVolume(int volRef) {
             for (int i = dirItems; i < (dirItems + batch); i++) {
                 jp_logf(L_DEBUG, "%s:    Found remote album candidate '%s' in '%s'; attributes=%x\n", MYNAME,  dirInfos[i].name, rootDir, dirInfos[i].attr);
                 if (dirInfos[i].attr & vfsFileAttrDirectory
-                        && (syncThumbnailDir || strcmp(dirInfos[i].name, "#Thumbnail")) // Treo 650 has #Thumbnail dir that is not an album
-                        && strcmp(dirInfos[i].name, ADDITIONAL_FILES)) {
+                        && (syncThumbnailDir || strcmp(dirInfos[i].name, "#Thumbnail"))) { // Treo 650 has #Thumbnail dir that is not an album
                     jp_logf(L_DEBUG, "%s:    Found real remote album '%s' in '%s'\n", MYNAME, dirInfos[i].name, rootDir);
                     PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, NULL, lcRoot, dirInfos[i].name);
                     result = MIN(result, albumResult);
@@ -1059,7 +1057,7 @@ PI_ERR syncVolume(int volRef) {
                     && strcmp(entry->d_name, ".")
                     && strcmp(entry->d_name, "..")
                     && (syncThumbnailDir || strcmp(entry->d_name, "#Thumbnail")) // Treo 650 has #Thumbnail dir that is not an album
-                    && strcmp(entry->d_name, ADDITIONAL_FILES)
+                    && strcmp(entry->d_name, ADDITIONAL_FILES + 1)
                     && cmpRemote(dirInfos, dirItems, entry->d_name)) {
                 jp_logf(L_DEBUG, "%s:    Found real local album '%s' in '%s'\n", MYNAME, entry->d_name, lcRoot + strlen(mediaHome) + 1);
                 PI_ERR albumResult = syncAlbum(volRef, 0, rootDir, dirP, lcRoot, entry->d_name);
