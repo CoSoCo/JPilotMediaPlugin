@@ -133,8 +133,6 @@ PI_ERR createRemoteDir(const int volRef, char *path, const char *dir, const char
 int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcDir, const char *file);
 int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file);
 
-// ToDo: replace strcat() by stpcpy()
-
 void plugin_version(int *major_version, int *minor_version) {
     *major_version = 0;
     *minor_version = 99;
@@ -477,7 +475,7 @@ int createLocalDir(char *path, const char *dir, const int volRef, const char *rm
     } else if ((dir = strrchr(path, '/'))) {
         parent[dir - path] = '\0';
     } else {
-        strcpy(parent, "."); // ToDo: in this case do not reset parent's date
+        strcpy(parent, ".");
     }
     stpcpy(stpcpy(rmDir, rmPath), pathBase);
     time_t parentDate = strcmp(parent, ".") && strcmp(strrchr(parent, '/'), ADDITIONAL_FILES) ? getLocalDate(parent) : 0; // skip in case
@@ -485,7 +483,7 @@ int createLocalDir(char *path, const char *dir, const int volRef, const char *rm
     int result = mkdir(path, 0777);
     if (!result) {
         jp_logf(L_INFO, "%s:     Created directory '%s'\n", MYNAME, path);
-        if (parentDate)  setLocalDate(parent, parentDate); // Recover date of parent path, because mkdir() changed it. // ToDo: maybe do always, at least for lcRoot
+        if (parentDate)  setLocalDate(parent, parentDate); // Recover date of parent path, because mkdir() changed it.
     } else if (errno != EEXIST) {
         jp_logf(L_FATAL, "%s:     ERROR %d: Could not create directory %s\n", MYNAME, errno, path);
         *(strrchr(path, '/')) = '\0'; // truncate *path
@@ -598,7 +596,7 @@ int enumerateOpenDir(const int volRef, const FileRef dirRef, const char *rmDir, 
     return dirItems;
 }
 
-int enumerateDir(const int volRef, const char *rmDir, VFSDirInfo dirInfos[]) { // ToDo: combine with upper function
+int enumerateDir(const int volRef, const char *rmDir, VFSDirInfo dirInfos[]) { // ToDo: maybe combine with upper function
     FileRef dirRef;
     PI_ERR piErr = dlp_VFSFileOpen(sd, volRef, rmDir, vfsModeRead, &dirRef);
     if (piErrLog(piErr, L_FATAL, volRef, rmDir, "      ", ": Could not open dir","") < 0)  return piErr;
@@ -636,7 +634,9 @@ PI_ERR listRemoteFiles(const int volRef, const char *rmDir, const int depth) {
         int filesize = 0;
         time_t date = 0;
 
-        strncat(strncat(strcpy(child, strcmp(rmDir, "/") ? rmDir : ""), "/", NAME_MAX-1), dirInfos[i].name, NAME_MAX-1);
+        char *temp = stpcpy(child, strcmp(rmDir, "/") ? rmDir : "");
+        temp = stpncpy(temp, "/", NAME_MAX-1-strlen(child));
+        stpncpy(temp, dirInfos[i].name, NAME_MAX-1-strlen(child));
         //~ strncat(strcmp(rmDir, "/") ? strncat(strcat(child, rmDir), "/", NAME_MAX-1) : child, dirInfos[i].name, NAME_MAX-1); // for paths without '/' at start
         if (dlp_VFSFileOpen(sd, volRef, child, vfsModeRead, &fileRef) < 0) {
             jp_logf(L_DEBUG, "%s WARNING: Cannot get size/date from %s\n", prefix, dirInfos[i].name);
@@ -717,8 +717,8 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
     FILE *fileP;
     int filesize; // also serves as error return code
 
-    strcat(strcat(strcpy(rmPath, rmDir), "/"), file);
-    strcat(strcat(strcpy(lcPath, lcDir), "/"), file);
+    stpcpy(stpcpy(stpcpy(rmPath, rmDir), "/"), file);
+    stpcpy(stpcpy(stpcpy(lcPath, lcDir), "/"), file);
 
     if (piErrLog(dlp_VFSFileOpen(sd, volRef, rmPath, vfsModeRead, &fileRef),
             L_FATAL, volRef, rmPath, "      ", ": Could not open remote file","") < 0)
@@ -812,8 +812,8 @@ int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, con
     FileRef fileRef;
     int filesize; // also serves as error return
 
-    strcat(strcat(strcpy(lcPath, lcDir), "/"), file);
-    strcat(strcat(strcpy(rmPath, rmDir), "/"), file);
+    stpcpy(stpcpy(stpcpy(lcPath, lcDir), "/"), file);
+    stpcpy(stpcpy(stpcpy(rmPath, rmDir), "/"), file);
 
     struct stat fstat;
     int statErr;
@@ -885,25 +885,25 @@ int cmpRemote(VFSDirInfo dirInfos[], int dirItems, const char *fname) {
 /*
  * Synchonize a remote album with the matching local album and backup or restore the containing files in them.
  */
-PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR *dirP, const char *lcRoot, const char *name) {
-    char rmTmp[name ? strlen(rmRoot) + strlen(name) + 2 : 0], *rmAlbum;
-    char lcTmp[name ? strlen(lcRoot) + strlen(name) + 2 : 0], *lcAlbum;
+PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR *dirP, const char *lcRoot, const char *album) {
+    char rmTmp[album ? strlen(rmRoot) + strlen(album) + 2 : 0], *rmAlbum = rmTmp, *dir;
+    char lcTmp[album ? strlen(lcRoot) + strlen(album) + 2 : 0], *lcAlbum = lcTmp;
     VFSDirInfo dirInfos[MAX_DIR_ITEMS];
     int dirItems = 0;
     struct stat fstat;
     int statErr;
     PI_ERR result = 0;
 
-    if (name) {
-        rmAlbum = strcat(strcat(strcpy(rmTmp ,rmRoot), "/"), name);
+    if (album) {
+        stpcpy(stpcpy(dir = stpcpy(rmAlbum ,rmRoot), "/"), album);
         if (!cmpExcludeDirList(volRef, rmAlbum))  return result;
         if (dirP) // indicates, that we are in restore-only mode, so
             dirItems = -1; // prevent search on remote album
-        lcAlbum = strcpy(lcTmp, lcRoot);
-        if (createLocalDir(lcAlbum, rmAlbum + strlen(rmRoot), dirP ? -1 : volRef, rmRoot)) { // in restore-only mode don't try to recover date
+        strcpy(lcAlbum, lcRoot);
+        if (createLocalDir(lcAlbum, dir, dirP ? -1 : volRef, rmRoot)) { // in restore-only mode don't try to recover date
             return -2;
         } else if (!(dirP = opendir(lcAlbum))) {
-            jp_logf(L_FATAL, "%s:    ERROR: Could not open dir '%s' on '%s'\n", MYNAME, name, lcRoot);
+            jp_logf(L_FATAL, "%s:    ERROR: Could not open dir '%s' on '%s'\n", MYNAME, album, lcRoot);
             return -2;
         }
         if (createRemoteDir(volRef, rmAlbum, NULL, lcAlbum) < 0) {
@@ -919,7 +919,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
         lcAlbum = (char *)lcRoot;
         if (!cmpExcludeDirList(volRef, rmAlbum))  return result;
     }
-    jp_logf(L_INFO, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, name ? name : ".", rmRoot, volRef);
+    jp_logf(L_INFO, "%s:    Sync album '%s' in '%s' on volume %d ...\n", MYNAME, album ? album : ".", rmRoot, volRef);
     if (!dirItems) // We are in backup mode !
         dirItems = enumerateOpenDir(volRef, dirRef, rmAlbum, dirInfos);
     jp_logf(L_DEBUG, "%s:     Now first search of local files, which to restore ...\n", MYNAME);
@@ -964,9 +964,9 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
     }
     time_t date = getRemoteDate(dirRef, volRef, rmAlbum, NULL);
     if (doBackup && date)  setLocalDate(lcAlbum, date); // always recover folder date from remote // ToDo: maybe do by BackupFileIfNeeded()
-    if (name)  dlp_VFSFileClose(sd, dirRef);
+    if (album)  dlp_VFSFileClose(sd, dirRef);
 Exit1:
-    if (name)  closedir(dirP);
+    if (album)  closedir(dirP);
     else  rewinddir(dirP);
     jp_logf(L_DEBUG, "%s:    Album '%s' done -> result=%d\n", MYNAME,  rmAlbum, result);
     return result;
