@@ -108,7 +108,7 @@ static fullPath *excludeDirList = NULL;
 static fullPath *deleteFileList = NULL;
 static fullPath *additionalFileList = NULL;
 static pi_buffer_t *piBuf, *piBuf2;
-static int sd; // the central socket descriptor.
+static int sd; // The central socket descriptor.
 static char mediaHome[NAME_MAX];
 static char syncLogEntry[128];
 static int importantWarning = 0;
@@ -145,18 +145,15 @@ int plugin_get_name(char *name, int len) {
 }
 
 int plugin_get_help_name(char *name, int len) {
-    //~ g_snprintf(name, len, _("About %s"), _(MYNAME)); // With language support.
+    //~ g_snprintf(name, len, _("About %s"), _(MYNAME)); // ToDo: With language support.
     snprintf(name, len, "About %s", MYNAME);
     return EXIT_SUCCESS;
 }
 
 int plugin_help(char **text, int *width, int *height) {
     // Unfortunately JPilot app tries to free the *text memory,
-    // so we must copy the text to new allocated heap memory first.
-    if ((*text = mallocLog(strlen(HELP_TEXT) + 1))) {
-        strcpy(*text, HELP_TEXT);
-    }
-    // *text = HELP_TEXT;  // alternative, causes crash !!!
+    // so we must copy the text to new allocated heap memory.
+    *text = strdup(HELP_TEXT);
     *height = 0;
     *width = 0;
     return EXIT_SUCCESS;
@@ -348,10 +345,9 @@ static void *mallocLog(size_t size) {
     return p;
 }
 
-static char *errString(const int isPiErr, const int err, const int level, const char message[]) { //, const int ignore1, const int ignore2) {
+static char *errString(const int isPiErr, const int err, const int level, const char message[]) {
     static char string[128];
     PI_ERR piOSErr = (isPiErr && err == PI_ERR_DLP_PALMOS) ? pi_palmos_error(sd) : 0;
-    //~ PI_ERR piOSErr = piErr == PI_ERR_DLP_PALMOS ? pi_palmos_error(sd) : 0;
     switch (piOSErr) {
         case 10760 : message = ": Not found the file"; break;
         case 10761 : message = ": The volume № is invalid;"; break;
@@ -947,8 +943,7 @@ PI_ERR syncAlbum(const unsigned volRef, FileRef dirRef, const char *rmRoot, DIR 
     for (int i=0; doBackup && i<dirItems; i++) {
         char *fname = dirInfos[i].name;
         jp_logf(L_DEBUG, "%s:      Found remote file '%s' attributes=%x\n", MYNAME, fname, dirInfos[i].attr);
-        // Grab only regular files, but ignore the 'read only' and 'archived' bits,
-        // and only with known extensions.
+        // Grab only regular files, but ignore the 'read only' and 'archived' bits, and only with known extensions.
         if (!(dirInfos[i].attr & (
                 vfsFileAttrHidden      |
                 vfsFileAttrSystem      |

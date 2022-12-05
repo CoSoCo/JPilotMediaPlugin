@@ -1,4 +1,4 @@
-Version 0.4.3   Nov 26, 2022
+Version 0.4.3   Dec 05, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Added listRemoteFiles() with pref listFiles.
 * Only backup but not restore filetypes with ".."-prefix in fileTypes list.
