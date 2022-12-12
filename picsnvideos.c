@@ -753,8 +753,9 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
             goto Exit;
         }
         // Find alternative destination file name, which not alredy exists, by inserting a number.
-        char *insert = strrchr(lcPath, '.');
-        for (char *i = lcPath + strlen(lcPath); i >= insert; i--)  *(i + 2) = *i;
+        char *i = lcPath + strlen(lcPath), *insert = strrchr(lcPath, '.');
+        insert = insert ? insert : i; // correct if there was no '.'
+        for (; i >= insert; i--)  *(i + 2) = *i;
         *insert++ = '_';  *insert = '1';
         for (; !stat(lcPath, &fstat); (*insert)++) {; // increment number by 1
             if (*insert >= '9') {
