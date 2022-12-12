@@ -270,24 +270,29 @@ Continue:
         //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', getLocalDate(lcDir)='%s'\n", MYNAME, lcDir, isoTime(getLocalDate(lcDir)));
         char *fname = strrchr(item->name, '/');
         FileRef fileRef = 0;
-        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0 && doBackup) { // Backup file ...
+        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0) { // Backup file ...
             time_t parentDate = 0;
             unsigned long attr = 0;
-            dlp_VFSFileGetAttributes(sd, fileRef, &attr);
+            piErr = piErrLog(dlp_VFSFileGetAttributes(sd, fileRef, &attr),
+                    L_FATAL, item->volRef, item->name, "    ", ": Could not get attributes from remote file","");
             dlp_VFSFileClose(sd, fileRef);
-            if (attr & vfsFileAttrDirectory)
-                createLocalDir(lcDir, item->name, item->volRef, "");
-            else {
-                *fname++ = '\0'; // truncate dir part from item->name
-                //~ jp_logf(L_DEBUG, "%s:     new item->name='%s', fname='%s'\n", MYNAME, item->name, fname);
-                if (!*(item->name) || !createLocalDir(lcDir, item->name, item->volRef, "")) {
-                    parentDate = getLocalDate(lcDir);
-                    backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
-                    //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', parentDate='%s'\n", MYNAME, lcDir, isoTime(parentDate));
-                    if (parentDate)  setLocalDate(lcDir, parentDate); // recover parent dir date. // ToDo: maybe do by BackupFileIfNeeded()
+            if (doBackup) {
+                if (piErr >= 0 && attr & vfsFileAttrDirectory)
+                    createLocalDir(lcDir, item->name, item->volRef, "");
+                else {
+                    *fname++ = '\0'; // truncate dir part from item->name
+                    //~ jp_logf(L_DEBUG, "%s:     new item->name='%s', fname='%s'\n", MYNAME, item->name, fname);
+                    if (!*(item->name) || !createLocalDir(lcDir, item->name, item->volRef, "")) {
+                        parentDate = getLocalDate(lcDir);
+                        backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
+                        //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', parentDate='%s'\n", MYNAME, lcDir, isoTime(parentDate));
+                        if (parentDate)  setLocalDate(lcDir, parentDate); // recover parent dir date. // ToDo: maybe do by BackupFileIfNeeded()
+                    }
                 }
+            } else if (doRestore) {
+                jp_logf(L_WARN, "%s:     WARNING: Remote file '%s' on volume %d already exists. To replace, first delete it.\n", MYNAME, item->name, item->volRef);
             }
-        } else if (!fileRef && doRestore) { // Restore file ...
+        } else if (doRestore) { // Restore file ...
             char rmDir[NAME_MAX] = "", lcRoot[NAME_MAX];
             strcpy(lcRoot, lcDir);
             struct stat fstat;
@@ -303,10 +308,7 @@ Continue:
                 if (!*(item->name) || createRemoteDir(item->volRef, rmDir, item->name, lcRoot) >= 0)
                     restoreFile(lcDir, item->volRef, rmDir, fname);
             }
-        } else if (doRestore) {
-            jp_logf(L_WARN, "%s:     WARNING: Remote file '%s' on volume %d already exists. To replace, first delete it.\n", MYNAME, item->name, item->volRef);
         }
-        if (fileRef)  dlp_VFSFileClose(sd, fileRef);
     }
 
     if (!listFiles || additionalFileList)
@@ -478,7 +480,7 @@ int createLocalDir(char *path, const char *dir, const int volRef, const char *rm
     jp_logf(L_DEBUG, "%s:     path='%s', subDir='%s', parent='%s', parentDate='%s', rmDir='%s'\n", MYNAME, path, subDir, parent, isoTime(parentDate), rmDir);
     int result = mkdir(path, 0777);
     if (!result) {
-        jp_logf(L_INFO, "%s:     Created directory '%s'\n", MYNAME, path);
+        jp_logf(L_INFO, "%s:     Created local directory '%s'\n", MYNAME, path);
         if (parentDate)  setLocalDate(parent, parentDate); // Recover date of parent path, because mkdir() changed it.
     } else if (errno != EEXIST) {
         jp_logf(L_FATAL, "%s:     ERROR %d: Could not create directory %s\n", MYNAME, errno, path);
@@ -514,7 +516,7 @@ PI_ERR createRemoteDir(const int volRef, char *path, const char *dir, const char
     PI_ERR piErr = dlp_VFSDirCreate(sd, volRef, path);
     int piOSErr = piErr == PI_ERR_DLP_PALMOS ? pi_palmos_error(sd) : 0;
     if (piErr >= 0) {
-        jp_logf(L_INFO, "%s:     Created directory '%s' on volume %d\n", MYNAME, path, volRef);
+        jp_logf(L_INFO, "%s:     Created remote directory '%s' on volume %d\n", MYNAME, path, volRef);
         importantWarning = 1;
         time_t date = getLocalDate(lcDir);
         if (date)  setRemoteDate(0, volRef, path, date); // set remote dir date, if really created
