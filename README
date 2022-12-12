@@ -75,10 +75,10 @@ doBackup 1          # Disable to only restore from the computer.
 doRestore 1         # Disable to only backuo from the Palm.
 listFiles 0         # Instead syncing, list all files from the Palm up to depth n.
                       Must run with 'jpilot -d'.
-excludeDirs /Blazer:2>/PALM/Launcher # Dirs list to exclude from list or sync to avoid
+excludeDirs /Blazer:2>/PALM/Launcher  # Dirs list to exclude from list or sync to avoid
                       crash from bug <https://github.com/desrod/pilot-link/issues/11>.
 deleteFiles         # Collon separated list of arbitrary files and dirs to delete from
-                      the Palm device. 
+                      the Palm device.
 additionalFiles     # Collon separated list of arbitrary files and dirs to sync with
                       the $JPILOT_HOME/.jpilot/Media/VOLUME/#AdditionalFiles folder.
 * List items are separated by ':' and if prefixed by "n>" only apply on volume n.
