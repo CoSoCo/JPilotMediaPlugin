@@ -114,233 +114,6 @@ static char syncLogEntry[128];
 static int importantWarning = 0;
 
 
-static void *mallocLog(size_t size);
-static PI_ERR piErrLog(const PI_ERR piErr, const int level, const int volRef, const char *rmPath,
-        const char *indent, const char message[], const char comment[]);
-int parsePaths(char *paths, fullPath **list, char *text);
-void freePathList(fullPath *list);
-int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs);
-int syncVolume(int volRef);
-char *isoTime(const time_t time);
-PI_ERR listRemoteFiles(int volRef, const char *dir, const int indent);
-time_t getLocalDate(const char *path);
-void setLocalDate(const char *path, const time_t date);
-time_t getRemoteDate(const FileRef fileRef, const int volRef, const char *path, const char prefix[]);
-void setRemoteDate(FileRef fileRef, const int volRef, const char *path, const time_t date);
-static char *localRoot(const unsigned volRef);
-int createLocalDir(char *path, const char *dir, const int volRef, const char *rmPath);
-PI_ERR createRemoteDir(const int volRef, char *path, const char *dir, const char *lcPath);
-int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcDir, const char *file);
-int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file);
-
-void plugin_version(int *major_version, int *minor_version) {
-    int dotindex = strcspn(VERSION, ".");
-    static char major[] = VERSION;
-    major[dotindex] = '\0';
-    *major_version = atoi(major);
-    *minor_version = atoi(VERSION + dotindex + 1);
-}
-
-int plugin_get_name(char *name, int len) {
-    //~ snprintf(name, len, "%s %d.%d", MYNAME, PLUGIN_MAJOR, PLUGIN_MINOR);
-    strncpy(name, PACKAGE_STRING, len);
-    return EXIT_SUCCESS;
-}
-
-int plugin_get_help_name(char *name, int len) {
-    //~ g_snprintf(name, len, _("About %s"), _(MYNAME)); // ToDo: With language support.
-    snprintf(name, len, "About %s", MYNAME);
-    return EXIT_SUCCESS;
-}
-
-int plugin_help(char **text, int *width, int *height) {
-    // Unfortunately JPilot app tries to free the *text memory,
-    // so we must copy the text to new allocated heap memory.
-    *text = strdup(HELP_TEXT);
-    *height = 0;
-    *width = 0;
-    return EXIT_SUCCESS;
-}
-
-int plugin_startup(jp_startup_info *info) {
-    jp_init();
-    return EXIT_SUCCESS;
-}
-
-int plugin_sync(int socket) {
-    sd = socket;
-
-    // Read and process preferences.
-    jp_pref_init(prefs, NUM_PREFS);
-    if (jp_pref_read_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0)
-        jp_logf(L_WARN, "%s: WARNING: Could not read prefs[] from '%s'\n", MYNAME, PREFS_FILE);
-    if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // If pref file wasn't existent ...
-        jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE); // initialize with defaults.
-    jp_get_pref(prefs, 0, &prefsVersion, NULL);
-    if (prefsVersion != PREFS_VERSION) {
-        jp_logf(L_FATAL, "%s: ERROR: Version of preferences file '%s' must be %d, please update it!\n", MYNAME, PREFS_FILE, PREFS_VERSION);
-        return EXIT_FAILURE;
-    }
-    jp_get_pref(prefs, 1, NULL, (const char **)&rootDirs);
-    jp_get_pref(prefs, 2, &syncThumbnailDir, NULL);
-    jp_get_pref(prefs, 3, NULL, (const char **)&fileTypes);
-    jp_get_pref(prefs, 4, &useDateModified, NULL);
-    jp_get_pref(prefs, 5, &compareContent, NULL);
-    jp_get_pref(prefs, 6, &doBackup, NULL);
-    jp_get_pref(prefs, 7, &doRestore, NULL);
-    jp_get_pref(prefs, 8, &listFiles, NULL);
-    jp_get_pref(prefs, 9, NULL, (const char **)&excludeDirs);
-    jp_get_pref(prefs, 10, NULL, (const char **)&deleteFiles);
-    jp_get_pref(prefs, 11, NULL, (const char **)&additionalFiles);
-    if (    parsePaths(rootDirs, &rootDirList, "rootDirs") != EXIT_SUCCESS ||
-            parsePaths(fileTypes, &fileTypeList, "fileTypes") != EXIT_SUCCESS ||
-            parsePaths(excludeDirs, &excludeDirList, "excludeDirs") != EXIT_SUCCESS ||
-            parsePaths(deleteFiles, &deleteFileList, "deleteFiles") != EXIT_SUCCESS ||
-            parsePaths(additionalFiles, &additionalFileList, "additionalFiles") != EXIT_SUCCESS ||
-            !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))) {
-        jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
-        return EXIT_FAILURE;
-    }
-
-    // Use $JPILOT_HOME/.jpilot/ or current directory for PCDIR.
-    if (jp_get_home_file_name(PCDIR, mediaHome, NAME_MAX) < 0) {
-        jp_logf(L_WARN, "%s: WARNING: Could not get $JPILOT_HOME path, so using current directory.\n", MYNAME);
-        strcpy(mediaHome, "./"PCDIR);
-    }
-    if (listFiles)
-        jp_logf(L_INFO, "%s: List all files from the Palm device to the terminal, needs: 'jpilot -d'\n", MYNAME);
-    else {
-        jp_logf(L_INFO, "%s: Start syncing with '%s ...'\n", MYNAME, mediaHome);
-        // Check if there are any file types loaded.
-        if (!fileTypeList) {
-            jp_logf(L_FATAL, "%s: ERROR: Could not find any file types from '%s'; No media synced.\n", MYNAME, PREFS_FILE);
-            return EXIT_FAILURE;
-        }
-    }
-
-    // Get list of the volumes on the pilot.
-    int volRefs[MAX_VOLUMES];
-    int volumes = MAX_VOLUMES;
-    if (volumeEnumerateIncludeHidden(sd, &volumes, volRefs) < 0) {
-        jp_logf(L_FATAL, "%s: ERROR: Could not find any VFS volumes; No files to sync or list.\n", MYNAME);
-        return EXIT_FAILURE;
-    }
-
-    // Scan all the volumes for media and backup them.
-    int result = EXIT_FAILURE;
-    PI_ERR piErr;
-    for (int i=0; i<volumes; i++) {
-        if (listFiles) { // List all files from the Palm device, but don't sync.
-            if (listRemoteFiles(volRefs[i], "/", 1) < 0)  goto Continue;
-        } else if ((piErr = syncVolume(volRefs[i])) < -2) {
-            snprintf(syncLogEntry, sizeof(syncLogEntry),
-                    "%s:  WARNING: Could not find any media on volume %d; No media synced.\n", MYNAME, volRefs[i]);
-            jp_logf(L_WARN, syncLogEntry);
-            dlp_AddSyncLogEntry (sd, syncLogEntry);
-            goto Continue;
-        } else if (piErr < 0) {
-            snprintf(syncLogEntry, sizeof(syncLogEntry),
-                    "%s:  WARNING: Errors occured on volume %d; Some media may not be synced.\n", MYNAME, volRefs[i]);
-            jp_logf(L_WARN, syncLogEntry);
-            dlp_AddSyncLogEntry (sd, syncLogEntry);
-        }
-        result = EXIT_SUCCESS;
-Continue:
-    }
-
-    // Process deleteFileList ...
-    if (deleteFileList)
-        jp_logf(L_INFO, "%s: Delete files from pref 'deleteFiles' ...\n", MYNAME);
-    for (fullPath *item = deleteFileList; item; item = item->next) {
-        if (item->name[0] != '/')
-            jp_logf(L_WARN, "%s:     WARNING: Missing '/' at start of file '%s' on volume %d, not deleting it.\n", MYNAME, item->name, item->volRef);
-        else if ((piErrLog(dlp_VFSFileDelete(sd, item->volRef, item->name),
-                L_FATAL, item->volRef, item->name, "    ", ": Not deleted remote file","")) >= 0)
-            jp_logf(L_INFO, "%s:     Deleted remote file '%s' on volume %d\n", MYNAME, item->name, item->volRef);
-    }
-
-    // Process additionalFileList ...
-    if (additionalFileList)
-        jp_logf(L_INFO, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME%s ...'\n", MYNAME, mediaHome, ADDITIONAL_FILES);
-    for (fullPath *item = additionalFileList; item; item = item->next) {
-        jp_logf(L_DEBUG, "%s:  Sync additional file: item->volRef=%d, item->name='%s'\n", MYNAME, item->volRef, item->name);
-        if (item->name[0] != '/') {
-            jp_logf(L_WARN, "%s:     WARNING: Missing '/' at start of additional file '%s' on volume %d, not syncing it.\n", MYNAME, item->name, item->volRef);
-            continue;
-        }
-        char *lcDir = localRoot(item->volRef);
-        if (!lcDir || createLocalDir(lcDir, ADDITIONAL_FILES, -1, ""))  continue;
-        //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', getLocalDate(lcDir)='%s'\n", MYNAME, lcDir, isoTime(getLocalDate(lcDir)));
-        char *fname = strrchr(item->name, '/');
-        FileRef fileRef = 0;
-        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0) { // Backup file ...
-            time_t parentDate = 0;
-            unsigned long attr = 0;
-            piErr = piErrLog(dlp_VFSFileGetAttributes(sd, fileRef, &attr),
-                    L_FATAL, item->volRef, item->name, "    ", ": Could not get attributes from remote file","");
-            dlp_VFSFileClose(sd, fileRef);
-            if (doBackup) {
-                if (piErr >= 0 && attr & vfsFileAttrDirectory)
-                    createLocalDir(lcDir, item->name, item->volRef, "");
-                else {
-                    *fname++ = '\0'; // truncate dir part from item->name
-                    //~ jp_logf(L_DEBUG, "%s:     new item->name='%s', fname='%s'\n", MYNAME, item->name, fname);
-                    if (!*(item->name) || !createLocalDir(lcDir, item->name, item->volRef, "")) {
-                        parentDate = getLocalDate(lcDir);
-                        backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
-                        //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', parentDate='%s'\n", MYNAME, lcDir, isoTime(parentDate));
-                        if (parentDate)  setLocalDate(lcDir, parentDate); // recover parent dir date. // ToDo: maybe do by BackupFileIfNeeded()
-                    }
-                }
-            } else if (doRestore) {
-                jp_logf(L_WARN, "%s:     WARNING: Remote file '%s' on volume %d already exists. To replace, first delete it.\n", MYNAME, item->name, item->volRef);
-            }
-        } else if (doRestore) { // Restore file ...
-            char rmDir[NAME_MAX] = "", lcRoot[NAME_MAX];
-            strcpy(lcRoot, lcDir);
-            struct stat fstat;
-            int statErr;
-            if ((statErr = stat(strcat(lcDir, item->name), &fstat))) {
-                piErrLog(piErr, L_FATAL, item->volRef, item->name, "    ", ": Could not find remote file","");
-                jp_logf(L_FATAL, "%s:     ERROR %d: Could not read status of '%s'; No sync possible!\n", MYNAME, statErr, lcDir);
-                result = EXIT_FAILURE;
-            } else if (S_ISDIR(fstat.st_mode))
-                createRemoteDir(item->volRef, rmDir, item->name, lcRoot);
-            else {
-                *fname++ = *(strrchr(lcDir, '/')) = '\0'; // truncate from fname again.
-                if (!*(item->name) || createRemoteDir(item->volRef, rmDir, item->name, lcRoot) >= 0)
-                    restoreFile(lcDir, item->volRef, rmDir, fname);
-            }
-        }
-    }
-
-    if (!listFiles || additionalFileList)
-        jp_logf(L_DEBUG, "%s: Sync done -> result=%d\n", MYNAME, result);
-    if (result != EXIT_SUCCESS)
-        dlp_AddSyncLogEntry (sd, "Synchronization of Media was incomplete.\n");
-    if (importantWarning) {
-        // Avoids bug <https://github.com/desrod/pilot-link/issues/11>, as then the file "Album.db" is created, so the dir is not empty anymore.
-        jp_logf(L_WARN, "\n%s: IMPORTANT WARNING: Now open once the Media app on your Palm device to avoid crash (signal SIGCHLD) on next HotSync !!!\n\n", MYNAME);
-        dlp_AddSyncLogEntry (sd, MYNAME": IMPORTANT WARNING: Now open once the Media app to avoid crash with JPilot on next HotSync !!!\n");
-    }
-    return result;
-}
-
-int plugin_post_sync(void) {
-    pi_buffer_free(piBuf);
-    pi_buffer_free(piBuf2);
-    freePathList(rootDirList);
-    freePathList(fileTypeList);
-    freePathList(excludeDirList);
-    freePathList(deleteFileList);
-    freePathList(additionalFileList);
-    jp_free_prefs(prefs, NUM_PREFS); // Calling this in plugin_exit_cleanup() causes crash from free().
-    jp_logf(L_DEBUG, "%s: plugin_post_sync -> done.\n", MYNAME);
-    return EXIT_SUCCESS;
-}
-
-// ToDo: Reorder functions
-
 /* Log OOM error on malloc(). */
 static void *mallocLog(size_t size) {
     void *p;
@@ -368,6 +141,13 @@ static PI_ERR piErrLog(const PI_ERR piErr, const int level, const int volRef, co
         jp_logf(level, "%s: %s%s '%s' on volume %d%s\n", MYNAME, indent, errString(1, piErr, level, message), rmPath, volRef, comment);
     }
     return piErr;
+}
+
+void freePathList(fullPath *list) {
+    for (fullPath *item; (item = list);) {
+        list = list->next;
+        free(item);
+    }
 }
 
 int parsePaths(char *paths, fullPath **list, char *text) {
@@ -401,11 +181,10 @@ int parsePaths(char *paths, fullPath **list, char *text) {
     return EXIT_SUCCESS;
 }
 
-void freePathList(fullPath *list) {
-    for (fullPath *item; (item = list);) {
-        list = list->next;
-        free(item);
-    }
+char *isoTime(const time_t time) {
+    static char isoTime[20];
+    strftime(isoTime, 20, "%F %T", localtime (&time));
+    return isoTime;
 }
 
 time_t getLocalDate(const char *path) {
@@ -561,6 +340,14 @@ static char *localRoot(const unsigned volRef) {
     return path; // must not be free'd by caller as it's a static array
 }
 
+int cmpExcludeDirList(const int volRef, const char *dname) {
+    int result = 1;
+    for (fullPath *item = excludeDirList; dname && item; item = item->next) {
+        if ((item->volRef < 0 || volRef == item->volRef) && !(result = strcmp(dname, item->name)))  break;
+    }
+    return result;
+}
+
 int enumerateOpenDir(const int volRef, const FileRef dirRef, const char *rmDir, VFSDirInfo dirInfos[]) {
     int dirItems_init = MIN_DIR_ITEMS, dirItems;
     PI_ERR piErr;
@@ -603,20 +390,6 @@ int enumerateDir(const int volRef, const char *rmDir, VFSDirInfo dirInfos[]) { /
     int dirItems = enumerateOpenDir(volRef, dirRef, rmDir, dirInfos);
     dlp_VFSFileClose(sd, dirRef);
     return dirItems;
-}
-
-int cmpExcludeDirList(const int volRef, const char *dname) {
-    int result = 1;
-    for (fullPath *item = excludeDirList; dname && item; item = item->next) {
-        if ((item->volRef < 0 || volRef == item->volRef) && !(result = strcmp(dname, item->name)))  break;
-    }
-    return result;
-}
-
-char *isoTime(const time_t time) {
-    static char isoTime[20];
-    strftime(isoTime, 20, "%F %T", localtime (&time));
-    return isoTime;
 }
 
 /* List remote files and directories recursivly up to given depth. */
@@ -702,6 +475,26 @@ int fileCompare(FileRef fileRef, FILE *fileP, int filesize) {
         if ((result = memcmp(piBuf->data, piBuf2->data, piBuf->used))) {
             break; // Files have different content.
         }
+    }
+    return result;
+}
+
+int casecmpFileTypeList(const char *fname) {
+    char *ext = strrchr(fname, '.');
+    for (fullPath *item = fileTypeList; ext && item; item = item->next) {
+        if (*(item->name) != '-') {
+            if (!strcasecmp(ext + 1, item->name))  return 1; // backup & restore
+        } else {
+            if (!strcasecmp(ext + 1, item->name + 1))  return 0; // only backup
+        }
+    }
+    return -1; // no match, no sync
+}
+
+int cmpRemote(VFSDirInfo dirInfos[], int dirItems, const char *fname) {
+    int result = 1;
+    for (int i=0; i<dirItems; i++) {
+        if (!(result = strcmp(fname, dirInfos[i].name)))  break;
     }
     return result;
 }
@@ -861,26 +654,6 @@ Exit:
     fclose(fileP);
     jp_logf(L_DEBUG, "%s:       Restore file size / copy result: %d, statErr=%d\n", MYNAME, filesize, statErr);
     return filesize;
-}
-
-int casecmpFileTypeList(const char *fname) {
-    char *ext = strrchr(fname, '.');
-    for (fullPath *item = fileTypeList; ext && item; item = item->next) {
-        if (*(item->name) != '-') {
-            if (!strcasecmp(ext + 1, item->name))  return 1; // backup & restore
-        } else {
-            if (!strcasecmp(ext + 1, item->name + 1))  return 0; // only backup
-        }
-    }
-    return -1; // no match, no sync
-}
-
-int cmpRemote(VFSDirInfo dirInfos[], int dirItems, const char *fname) {
-    int result = 1;
-    for (int i=0; i<dirItems; i++) {
-        if (!(result = strcmp(fname, dirInfos[i].name)))  break;
-    }
-    return result;
 }
 
 /*
@@ -1128,4 +901,211 @@ int volumeEnumerateIncludeHidden(const int sd, int *numVols, int *volRefs) {
 Exit:
     jp_logf(L_DEBUG, "%s: volumeEnumerateIncludeHidden(): Found %d volumes -> piErr=%d\n", MYNAME, *numVols, piErr);
     return piErr;
+}
+
+
+void plugin_version(int *major_version, int *minor_version) {
+    int dotindex = strcspn(VERSION, ".");
+    static char major[] = VERSION;
+    major[dotindex] = '\0';
+    *major_version = atoi(major);
+    *minor_version = atoi(VERSION + dotindex + 1);
+}
+
+int plugin_get_name(char *name, int len) {
+    //~ snprintf(name, len, "%s %d.%d", MYNAME, PLUGIN_MAJOR, PLUGIN_MINOR);
+    strncpy(name, PACKAGE_STRING, len);
+    return EXIT_SUCCESS;
+}
+
+int plugin_get_help_name(char *name, int len) {
+    //~ g_snprintf(name, len, _("About %s"), _(MYNAME)); // ToDo: With language support.
+    snprintf(name, len, "About %s", MYNAME);
+    return EXIT_SUCCESS;
+}
+
+int plugin_help(char **text, int *width, int *height) {
+    // Unfortunately JPilot app tries to free the *text memory,
+    // so we must copy the text to new allocated heap memory.
+    *text = strdup(HELP_TEXT);
+    *height = 0;
+    *width = 0;
+    return EXIT_SUCCESS;
+}
+
+int plugin_startup(jp_startup_info *info) {
+    jp_init();
+    return EXIT_SUCCESS;
+}
+
+int plugin_sync(int socket) {
+    sd = socket;
+
+    // Read and process preferences.
+    jp_pref_init(prefs, NUM_PREFS);
+    if (jp_pref_read_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0)
+        jp_logf(L_WARN, "%s: WARNING: Could not read prefs[] from '%s'\n", MYNAME, PREFS_FILE);
+    if (jp_pref_write_rc_file(PREFS_FILE, prefs, NUM_PREFS) < 0) // If pref file wasn't existent ...
+        jp_logf(L_WARN, "%s: WARNING: Could not write prefs[] to '%s'\n", MYNAME, PREFS_FILE); // initialize with defaults.
+    jp_get_pref(prefs, 0, &prefsVersion, NULL);
+    if (prefsVersion != PREFS_VERSION) {
+        jp_logf(L_FATAL, "%s: ERROR: Version of preferences file '%s' must be %d, please update it!\n", MYNAME, PREFS_FILE, PREFS_VERSION);
+        return EXIT_FAILURE;
+    }
+    jp_get_pref(prefs, 1, NULL, (const char **)&rootDirs);
+    jp_get_pref(prefs, 2, &syncThumbnailDir, NULL);
+    jp_get_pref(prefs, 3, NULL, (const char **)&fileTypes);
+    jp_get_pref(prefs, 4, &useDateModified, NULL);
+    jp_get_pref(prefs, 5, &compareContent, NULL);
+    jp_get_pref(prefs, 6, &doBackup, NULL);
+    jp_get_pref(prefs, 7, &doRestore, NULL);
+    jp_get_pref(prefs, 8, &listFiles, NULL);
+    jp_get_pref(prefs, 9, NULL, (const char **)&excludeDirs);
+    jp_get_pref(prefs, 10, NULL, (const char **)&deleteFiles);
+    jp_get_pref(prefs, 11, NULL, (const char **)&additionalFiles);
+    if (    parsePaths(rootDirs, &rootDirList, "rootDirs") != EXIT_SUCCESS ||
+            parsePaths(fileTypes, &fileTypeList, "fileTypes") != EXIT_SUCCESS ||
+            parsePaths(excludeDirs, &excludeDirList, "excludeDirs") != EXIT_SUCCESS ||
+            parsePaths(deleteFiles, &deleteFileList, "deleteFiles") != EXIT_SUCCESS ||
+            parsePaths(additionalFiles, &additionalFileList, "additionalFiles") != EXIT_SUCCESS ||
+            !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))) {
+        jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
+        return EXIT_FAILURE;
+    }
+
+    // Use $JPILOT_HOME/.jpilot/ or current directory for PCDIR.
+    if (jp_get_home_file_name(PCDIR, mediaHome, NAME_MAX) < 0) {
+        jp_logf(L_WARN, "%s: WARNING: Could not get $JPILOT_HOME path, so using current directory.\n", MYNAME);
+        strcpy(mediaHome, "./"PCDIR);
+    }
+    if (listFiles)
+        jp_logf(L_INFO, "%s: List all files from the Palm device to the terminal, needs: 'jpilot -d'\n", MYNAME);
+    else {
+        jp_logf(L_INFO, "%s: Start syncing with '%s ...'\n", MYNAME, mediaHome);
+        // Check if there are any file types loaded.
+        if (!fileTypeList) {
+            jp_logf(L_FATAL, "%s: ERROR: Could not find any file types from '%s'; No media synced.\n", MYNAME, PREFS_FILE);
+            return EXIT_FAILURE;
+        }
+    }
+
+    // Get list of the volumes on the pilot.
+    int volRefs[MAX_VOLUMES];
+    int volumes = MAX_VOLUMES;
+    if (volumeEnumerateIncludeHidden(sd, &volumes, volRefs) < 0) {
+        jp_logf(L_FATAL, "%s: ERROR: Could not find any VFS volumes; No files to sync or list.\n", MYNAME);
+        return EXIT_FAILURE;
+    }
+
+    // Scan all the volumes for media and backup them.
+    int result = EXIT_FAILURE;
+    PI_ERR piErr;
+    for (int i=0; i<volumes; i++) {
+        if (listFiles) { // List all files from the Palm device, but don't sync.
+            if (listRemoteFiles(volRefs[i], "/", 1) < 0)  goto Continue;
+        } else if ((piErr = syncVolume(volRefs[i])) < -2) {
+            snprintf(syncLogEntry, sizeof(syncLogEntry),
+                    "%s:  WARNING: Could not find any media on volume %d; No media synced.\n", MYNAME, volRefs[i]);
+            jp_logf(L_WARN, syncLogEntry);
+            dlp_AddSyncLogEntry (sd, syncLogEntry);
+            goto Continue;
+        } else if (piErr < 0) {
+            snprintf(syncLogEntry, sizeof(syncLogEntry),
+                    "%s:  WARNING: Errors occured on volume %d; Some media may not be synced.\n", MYNAME, volRefs[i]);
+            jp_logf(L_WARN, syncLogEntry);
+            dlp_AddSyncLogEntry (sd, syncLogEntry);
+        }
+        result = EXIT_SUCCESS;
+Continue:
+    }
+
+    // Process deleteFileList ...
+    if (deleteFileList)
+        jp_logf(L_INFO, "%s: Delete files from pref 'deleteFiles' ...\n", MYNAME);
+    for (fullPath *item = deleteFileList; item; item = item->next) {
+        if (item->name[0] != '/')
+            jp_logf(L_WARN, "%s:     WARNING: Missing '/' at start of file '%s' on volume %d, not deleting it.\n", MYNAME, item->name, item->volRef);
+        else if ((piErrLog(dlp_VFSFileDelete(sd, item->volRef, item->name),
+                L_FATAL, item->volRef, item->name, "    ", ": Not deleted remote file","")) >= 0)
+            jp_logf(L_INFO, "%s:     Deleted remote file '%s' on volume %d\n", MYNAME, item->name, item->volRef);
+    }
+
+    // Process additionalFileList ...
+    if (additionalFileList)
+        jp_logf(L_INFO, "%s: Sync files from pref 'additionalFiles' with '%s/VOLUME%s ...'\n", MYNAME, mediaHome, ADDITIONAL_FILES);
+    for (fullPath *item = additionalFileList; item; item = item->next) {
+        jp_logf(L_DEBUG, "%s:  Sync additional file: item->volRef=%d, item->name='%s'\n", MYNAME, item->volRef, item->name);
+        if (item->name[0] != '/') {
+            jp_logf(L_WARN, "%s:     WARNING: Missing '/' at start of additional file '%s' on volume %d, not syncing it.\n", MYNAME, item->name, item->volRef);
+            continue;
+        }
+        char *lcDir = localRoot(item->volRef);
+        if (!lcDir || createLocalDir(lcDir, ADDITIONAL_FILES, -1, ""))  continue;
+        //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', getLocalDate(lcDir)='%s'\n", MYNAME, lcDir, isoTime(getLocalDate(lcDir)));
+        char *fname = strrchr(item->name, '/');
+        FileRef fileRef = 0;
+        if ((piErr = dlp_VFSFileOpen(sd, item->volRef, item->name, vfsModeRead, &fileRef)) >= 0) { // Backup file ...
+            time_t parentDate = 0;
+            unsigned long attr = 0;
+            piErr = piErrLog(dlp_VFSFileGetAttributes(sd, fileRef, &attr),
+                    L_FATAL, item->volRef, item->name, "    ", ": Could not get attributes from remote file","");
+            dlp_VFSFileClose(sd, fileRef);
+            if (doBackup) {
+                if (piErr >= 0 && attr & vfsFileAttrDirectory)
+                    createLocalDir(lcDir, item->name, item->volRef, "");
+                else {
+                    *fname++ = '\0'; // truncate dir part from item->name
+                    //~ jp_logf(L_DEBUG, "%s:     new item->name='%s', fname='%s'\n", MYNAME, item->name, fname);
+                    if (!*(item->name) || !createLocalDir(lcDir, item->name, item->volRef, "")) {
+                        parentDate = getLocalDate(lcDir);
+                        backupFileIfNeeded(item->volRef, item->name, lcDir, fname);
+                        //~ jp_logf(L_DEBUG, "%s:     lcDir='%s', parentDate='%s'\n", MYNAME, lcDir, isoTime(parentDate));
+                        if (parentDate)  setLocalDate(lcDir, parentDate); // recover parent dir date. // ToDo: maybe do by BackupFileIfNeeded()
+                    }
+                }
+            } else if (doRestore) {
+                jp_logf(L_WARN, "%s:     WARNING: Remote file '%s' on volume %d already exists. To replace, first delete it.\n", MYNAME, item->name, item->volRef);
+            }
+        } else if (doRestore) { // Restore file ...
+            char rmDir[NAME_MAX] = "", lcRoot[NAME_MAX];
+            strcpy(lcRoot, lcDir);
+            struct stat fstat;
+            int statErr;
+            if ((statErr = stat(strcat(lcDir, item->name), &fstat))) {
+                piErrLog(piErr, L_FATAL, item->volRef, item->name, "    ", ": Could not find remote file","");
+                jp_logf(L_FATAL, "%s:     ERROR %d: Could not read status of '%s'; No sync possible!\n", MYNAME, statErr, lcDir);
+                result = EXIT_FAILURE;
+            } else if (S_ISDIR(fstat.st_mode))
+                createRemoteDir(item->volRef, rmDir, item->name, lcRoot);
+            else {
+                *fname++ = *(strrchr(lcDir, '/')) = '\0'; // truncate from fname again.
+                if (!*(item->name) || createRemoteDir(item->volRef, rmDir, item->name, lcRoot) >= 0)
+                    restoreFile(lcDir, item->volRef, rmDir, fname);
+            }
+        }
+    }
+
+    if (!listFiles || additionalFileList)
+        jp_logf(L_DEBUG, "%s: Sync done -> result=%d\n", MYNAME, result);
+    if (result != EXIT_SUCCESS)
+        dlp_AddSyncLogEntry (sd, "Synchronization of Media was incomplete.\n");
+    if (importantWarning) {
+        // Avoids bug <https://github.com/desrod/pilot-link/issues/11>, as then the file "Album.db" is created, so the dir is not empty anymore.
+        jp_logf(L_WARN, "\n%s: IMPORTANT WARNING: Now open once the Media app on your Palm device to avoid crash (signal SIGCHLD) on next HotSync !!!\n\n", MYNAME);
+        dlp_AddSyncLogEntry (sd, MYNAME": IMPORTANT WARNING: Now open once the Media app to avoid crash with JPilot on next HotSync !!!\n");
+    }
+    return result;
+}
+
+int plugin_post_sync(void) {
+    pi_buffer_free(piBuf);
+    pi_buffer_free(piBuf2);
+    freePathList(rootDirList);
+    freePathList(fileTypeList);
+    freePathList(excludeDirList);
+    freePathList(deleteFileList);
+    freePathList(additionalFileList);
+    jp_free_prefs(prefs, NUM_PREFS); // Calling this in plugin_exit_cleanup() causes crash from free().
+    jp_logf(L_DEBUG, "%s: plugin_post_sync -> done.\n", MYNAME);
+    return EXIT_SUCCESS;
 }
