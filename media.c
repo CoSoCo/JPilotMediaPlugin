@@ -1,8 +1,8 @@
 /*******************************************************************************
- * picsnvideos.c
+ * media.c
  *
  * Copyright (C) 2008 by Dan Bodoh
- * Contributor (2022): Ulf Zibis <Ulf.Zibis@CoSoCo.de>
+ * Copyright (C) 2022 by Ulf Zibis <Ulf.Zibis@CoSoCo.de>
  *
  * This program is free software; you can redistribute it and/or modify
  * it under the terms of the GNU General Public License as published by
@@ -37,7 +37,7 @@
 //#include "i18n.h"
 
 #define MYNAME PACKAGE_NAME
-#define PCDIR "Media"
+#define PCDIR MYNAME
 #define PREFS_VERSION 3
 #define ADDITIONAL_FILES "/#AdditionalFiles"
 
@@ -52,9 +52,9 @@ typedef struct VFSDirInfo VFSDirInfo;
 typedef struct fullPath {int volRef; char *name; struct fullPath *next;} fullPath;
 
 static const char HELP_TEXT[] =
-"JPilot plugin (c) 2008 by Dan Bodoh\n\
-Contributor (2022): Ulf Zibis <Ulf.Zibis@CoSoCo.de>\n\
-Version: "VERSION"\n\
+"JPilot plugin, version: "VERSION"\n\
+(c) 2008 by Dan Bodoh\n\
+(c) 2022 by Ulf Zibis <Ulf.Zibis@CoSoCo.de>\n\
 \n\
 Synchronizes media as pictures, videos and audios from\n\
 the Pics&Videos storage and SDCard in the Palm with\n\
@@ -62,9 +62,9 @@ folder '"PCDIR"' in your JPilot data directory,\n\
 usually \"$JPILOT_HOME/.jpilot\".\n\
 \n\
 For more documentation, bug reports and new versions,\n\
-see https://github.com/danbodoh/picsnvideos-jpilot";
+see https://github.com/CoSoCo/JPilotMediaPlugin";
 
-static const char *PREFS_FILE = "picsnvideos.rc";
+static const char *PREFS_FILE = PACKAGE".rc";
 static prefType prefs[] = {
     {"prefsVersion", INTTYPE, INTTYPE, PREFS_VERSION, NULL, 0},
     {"rootDirs", CHARTYPE, CHARTYPE, 0, "1>/Photos & Videos:1>/Fotos & Videos:/DCIM", 0},
@@ -134,8 +134,11 @@ int backupFileIfNeeded(const unsigned volRef, const char *rmDir, const char *lcD
 int restoreFile(const char *lcDir, const unsigned volRef, const char *rmDir, const char *file);
 
 void plugin_version(int *major_version, int *minor_version) {
-    *major_version = 0;
-    *minor_version = 99;
+    int dotindex = strcspn(VERSION, ".");
+    static char major[] = VERSION;
+    major[dotindex] = '\0';
+    *major_version = atoi(major);
+    *minor_version = atoi(VERSION + dotindex + 1);
 }
 
 int plugin_get_name(char *name, int len) {
@@ -336,7 +339,6 @@ int plugin_post_sync(void) {
     return EXIT_SUCCESS;
 }
 
-// ToDo: Rename picsnvideos ./. media
 // ToDo: Reorder functions
 
 /* Log OOM error on malloc(). */

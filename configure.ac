@@ -2,9 +2,9 @@
 # Process this file with autoconf to produce a configure script.
 
 AC_PREREQ([2.71])
-AC_INIT([Pics&Videos],[0.4.3])
+AC_INIT([Media],[1.0])
 AM_INIT_AUTOMAKE
-AC_CONFIG_SRCDIR([picsnvideos.c])
+AC_CONFIG_SRCDIR([media.c])
 AC_CONFIG_HEADERS([config.h])
 AC_CONFIG_MACRO_DIRS([m4])
 

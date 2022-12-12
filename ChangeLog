@@ -1,3 +1,7 @@
+Version 1.0   Dec 12, 2022
+Ulf Zibis <Ulf.Zibis@CoSoCo.de>
+* Rename Pics&Videos -> Media and picsnvideos -> media.
+
 Version 0.4.3   Dec 12, 2022
 Ulf Zibis <Ulf.Zibis@CoSoCo.de>
 * Added listRemoteFiles() with pref listFiles.

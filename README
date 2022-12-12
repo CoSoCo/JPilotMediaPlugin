@@ -1,44 +1,91 @@
 
-Picsnvideos is a plugin for JPilot. It fetches pictures and
-videos from late model Palm smartphones.
+JPilotMediaPlugin is for JPilot <http://JPilot.org>.  It is forked from
+Pics&Videos by Dan Bodoh <https://github.com/danbodoh/picsnvideos-jpilot>.
+It synchronizes media such as pictures, videos and audios with
+late model Palm smartphones.
 
-Picsnvideos supports the Treo 650, Treo 680, Treo 700p, Treo 755p, and
+JPilotMediaPlugin supports the Treo 650, Treo 680, Treo 700p, Treo 755p, and
 the Centro.  Only the Treo 650 and Centro have been known to be tested.
 Please post your experiences with untested devices at
-https://github.com/danbodoh/picsnvideos-jpilot
+https://github.com/CoSoCo/JPilotMediaPlugin
 
-This plugin fetches, rather than syncs.  The plugin reads pictures and
-videos taken with the camera on the Palm, and stores them on the computer.
-It will also fetch audio captions added with the 'Pics&Videos'
-application (known as 'Media' on older Palms).  Files are never deleted
+This plugin fully syncs.  It backups pictures and videos, taken with the
+camera of the Palm device, to your computer and also restores them back.
+It will also fetch audio captions added with the 'Media' application
+(also known as 'Pics&Videos' on some Palms).  Files are never deleted
 from the Palm or from the computer.
 
-Files from the internal memory of the Palm are stored in
-'$JPILOT_HOME/.jpilot/Media/Device/'.  Files from the Palm's SD Card are stored in
-'$JPILOT_HOME/.jpilot/Media/SDCard/'.
+Files from the internal memory of the Palm device are synced with
+'$JPILOT_HOME/.jpilot/Media/Device'.
+Files from the Palm's SD Card are synced with
+'$JPILOT_HOME/.jpilot/Media/SDCard'.
 
-Each album on the Palm is a directory under 'Device/' or 'SDCard/'.
-Some older Palms will create an 'Unfiled/' directory for pictures and
-videos that have not yet been moved to an album.
+Each album on the Palm is synced with a directory under 'Device' or 'SDCard'.
+Some older Palms will create an 'Unfiled' directory for media that
+have not yet been moved to an album.
 
-The file extensions of the files that picsnvideos fetches include:
+The extensions of the files, that JPilotMediaPlugin syncs by default:
     .jpg - JPEG pictures
     .amr - audio photo captions from GSM phones
     .qcp - audio photo captions from CDMA phones
     .3gp - video clips from GSM phones
     .3g2 - video clips from CDMA phones
+    .avi - AVI videos imported from elsewhere
 
 The audio photo captions are named <photo_name.jpg>.amr or
 <photo_name.jpg>.qcp.  For example, the picture
 photo_051608_001.jpg  will have an audio caption named
 photo_051608_001.jpg.amr (or .qcp).
 
-Once a picture or video has been fetched, it will never be fetched
-again even if it moved to a different album.  Re-recorded audio captions
-will be refetched.  To force all pictures to be re-fetched, delete
-the files $JPILOT_HOME/.jpilot/Media/.
+Once a file has been synced, it will never be fetched again, unless it
+was moved to a different album or modified.  Re-recorded audio captions
+will be refetched.  Files on the Palm, which have been moved, will create
+duplicates and modified files will add renamed ones on the computer
+while syncing.  If that happend, it will be a good idea, to delete the
+old version on the computer and eventually rename back the new one.
+Otherwise on the next HotSync the duplicates will be stored back to
+the Palm.  As usually there is no 'created date' for files on Linux,
+but the 'created date' on the palm is the one, which is displayed by the
+Media app, on sync it is taken for the 'modified date' on Linux.  On
+restore, the 'modified date' is taken for both dates on the Palm files.
+Also folder dates are mirrored correctly between Palm device and PC.
+If you restored an empty album to the Palm, you must once open the Media
+app on your Palm device (creates a 'Album.db' file in the directory, so
+it is no more empty) to avoid a crash (signal SIGCHLD) on next HotSync.
+See bug: <https://github.com/desrod/pilot-link/issues/11>.
+To force pictures to be re-fetched, delete the files in
+$JPILOT_HOME/.jpilot/Media/.
+
+After first run, a preferences file '$JPILOT_HOME/.jpilot/media.rc' is
+created.  It contains the following defaults, which can be changed
+(0 = false, 1 = true):
+
+prefsVersion 3      # Version of the prefs file.
+rootDirs 1>/Photos & Videos:1>/Fotos & Videos:/DCIM"  # Directories on the Palm
+                      device, considered as media locations.  May have different
+                      names on Palm devices, other than english or german ones.
+syncThumbnailDir 0  # Sync the folder '#Thumbnail' on the Palm.
+                      Additionally type 'thb' or '-thb' must be added below.
+fileTypes jpg:amr:qcp:3gp:3g2:avi  # The file extensions to be synced.
+                      A prefixed '-' indicates not to restore from this type.
+useDateModified 0   # By default, the 'created date' of the Palm files is taken.
+compareContent 0    # Beside the files size, also its content is compared
+                      to assert identity. This can take some time.
+doBackup 1          # Disable to only restore from the computer.
+doRestore 1         # Disable to only backuo from the Palm.
+listFiles 0         # Instead syncing, list all files from the Palm up to depth n.
+                      Must run with 'jpilot -d'.
+excludeDirs /Blazer:2>/PALM/Launcher # Dirs list to exclude from list or sync to avoid
+                      crash from bug <https://github.com/desrod/pilot-link/issues/11>.
+deleteFiles         # Collon separated list of arbitrary files and dirs to delete from
+                      the Palm device. 
+additionalFiles     # Collon separated list of arbitrary files and dirs to sync with
+                      the $JPILOT_HOME/.jpilot/Media/VOLUME/#AdditionalFiles folder.
+* List items are separated by ':' and if prefixed by "n>" only apply on volume n.
+* Don't add '#' comments to the prefs, otherwise -> error or unknown behaviour!
+* To get back the defaults, just delete '$JPILOT_HOME/.jpilot/media.rc'.
 
 Problems or suggestions can be reported in the forums or tracker at
-https://github.com/danbodoh/picsnvideos-jpilot.  it is helpful to include
-the output that 'jpilot -d' creates whey you sync.
+https://github.com/CoSoCo/JPilotMediaPlugin.  It is helpful to include
+the output that 'jpilot -d' creates, when you sync.
 This output goes both to standard output and to 'jpilot.log'.
