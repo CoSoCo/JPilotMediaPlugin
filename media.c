@@ -69,12 +69,13 @@ static prefType prefs[] = {
     {"prefsVersion", INTTYPE, INTTYPE, PREFS_VERSION, NULL, 0},
     {"rootDirs", CHARTYPE, CHARTYPE, 0, "1>/Photos & Videos:1>/Fotos & Videos:/DCIM", 0},
     {"syncThumbnailDir", INTTYPE, INTTYPE, 0, NULL, 0},
-    // JPEG picture
-    // video (GSM phones)
-    // video (CDMA phones)
-    // audio caption (GSM phones)
-    // audio caption (CDMA phones)
     {"fileTypes", CHARTYPE, CHARTYPE, 0, "jpg:amr:qcp:3gp:3g2:avi", 0},
+        // JPEG pictures
+        // audio captions (GSM phones)
+        // audio captions (CDMA phones)
+        // video clips (GSM phones)
+        // video clips (CDMA phones)
+        // AVI videos imported from elsewhere
     {"useDateModified", INTTYPE, INTTYPE, 0, NULL, 0},
     {"compareContent", INTTYPE, INTTYPE, 0, NULL, 0},
     {"doBackup", INTTYPE, INTTYPE, 1, NULL, 0},
@@ -905,15 +906,15 @@ Exit:
 
 /***********************************************************************/
 
-// Workaroud since this function is missing in prefs.c in JPilot version 2.0.2
+// Workaroud since this function is deactivated in prefs.c in JPilot version 2.0.2
 void jp_pref_init(prefType prefs[], int count) {
    for (int i=0; i<count; i++) {
       prefs[i].svalue = strdup(prefs[i].svalue ? prefs[i].svalue : "");
-      prefs[i].svalue_size = strlen(prefs[i].svalue)+1;
+      prefs[i].svalue_size = strlen(prefs[i].svalue) + 1;
    }
 }
 
-// Workaroud since this function is missing in prefs.c in JPilot version 2.0.2
+// Workaroud since this function is deactivated in prefs.c in JPilot version 2.0.2
 void jp_free_prefs(prefType prefs[], int count) {
    for (int i=0; i<count; i++) {
       if (prefs[i].svalue) {
