@@ -235,7 +235,7 @@ void setRemoteDate(FileRef fileRef, const int volRef, const char *path, const ti
 }
 
 /*
- * *path becomes extended by *dir as successfully created.
+ * *path becomes extended by *dir if successfully created.
  * If *dir is non-NULL, it should start with "/" and *path should be already existent and start with "/" or "./".
  * If *dir is NULL, only the last element of *path may be non-existent and *path should start with "/" or "./".
  * If *rmPath should be in sync with *path.
@@ -278,7 +278,7 @@ int createLocalDir(char *path, const char *dir, const int volRef, const char *rm
 }
 
 /*
- * *path becomes extended by *dir as successfully created.
+ * *path becomes extended by *dir if successfully created.
  * If *dir is non-NULL, it should start with "/" and *path should be already existent and start with "/".
  * If *dir is NULL, only the last element of *path may be non-existent and *path should start with "/".
  * If *lcPath should be in sync with *path.
@@ -903,6 +903,25 @@ Exit:
     return piErr;
 }
 
+/***********************************************************************/
+
+// Workaroud since this function is missing in prefs.c in JPilot version 2.0.2
+void jp_pref_init(prefType prefs[], int count) {
+   for (int i=0; i<count; i++) {
+      prefs[i].svalue = strdup(prefs[i].svalue ? prefs[i].svalue : "");
+      prefs[i].svalue_size = strlen(prefs[i].svalue)+1;
+   }
+}
+
+// Workaroud since this function is missing in prefs.c in JPilot version 2.0.2
+void jp_free_prefs(prefType prefs[], int count) {
+   for (int i=0; i<count; i++) {
+      if (prefs[i].svalue) {
+         free(prefs[i].svalue);
+         prefs[i].svalue = NULL;
+      }
+   }
+}
 
 void plugin_version(int *major_version, int *minor_version) {
     int dotindex = strcspn(VERSION, ".");
