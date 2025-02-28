@@ -4,7 +4,7 @@ Header: 16 bytes
 Record per photo: 352 bytes from 0x0010
   0x0000: file name in UTF-8 (from local host)
   0x0100: number of the associated thumbnail file in hex
-  0x0104: created  date in sec. since 01.01.1904 00:00:00 GMT (displayed in Media App)
+  0x0104: created  date in sec. since 01.01.1904 00:00:00 GMT (displayed in Media App in Palm device)
   0x0108: modified date in sec. since 01.01.1904 00:00:00 GMT
   0x010C: file size of photos
 
