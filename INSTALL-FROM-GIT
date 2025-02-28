@@ -4,13 +4,14 @@ Install JPilot & pilot-link:
 curl -s https://packagecloud.io/install/repositories/judd/jpilot/script.deb.sh | sudo bash
 sudo apt install jpilot jpilot-plugins pilot-link
 
-Install dependencies (jammy):
-Get libpisock-dev_*_amd64.deb from: https://packages.ubuntu.com/bionic/amd64/libpisock-dev/download
-Manually extract 'data.tar.xz' from it.
-sudo tar -xkf data.tar.xz -C /
-sudo apt install libusb-dev libbluetooth-dev
-Install dependencies (noble):
-sudo apt install libpisock-dev # depends on libusb-dev libbluetooth-dev
+Install dependencies:
+(jammy):
+  Get libpisock-dev_*_amd64.deb from: https://packages.ubuntu.com/bionic/amd64/libpisock-dev/download
+  Manually extract 'data.tar.xz' from it.
+  sudo tar -xkf data.tar.xz -C /
+  sudo apt install libpisync1 libusb-dev libbluetooth-dev
+(noble):
+  sudo apt install libpisock-dev # depends on libpisync1 libusb-dev libbluetooth-dev
 
 From the project folder:
 autoreconf -i
@@ -20,12 +21,18 @@ make clean
 make
 make check
 sudo make install
+sudo rm /usr/lib/jpilot/plugins/libmedia.la
 #make local_install ## for local install
+#rm ~/.jpilot/plugins/libmedia.la ## for local install
+
 
 Uninstall:
-sudo bash "uninstall libpisock-dev.sh"
-sudo apt purge libusb-dev libbluetooth-dev
 sudo make uninstall
+(jammy):
+  sudo bash "uninstall libpisock-dev.sh"
+  sudo apt purge libpisync1 libusb-dev libbluetooth-dev
+(noble):
+  sudo apt --autoremove purge libpisock-dev
 
 GIT:
 git status
