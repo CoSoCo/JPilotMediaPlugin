@@ -27,7 +27,7 @@ sudo rm /usr/lib/jpilot/plugins/libmedia.la
 
 Alternative to `sudo make install`:
 cc -s -fPIC -shared media.c -o libmedia.so
-sudo mv libmedia.so usr/lib/jpilot/plugins/
+chmod g-w,-x libmedia.so && sudo chown root:root libmedia.so && sudo mv libmedia.so /usr/lib/jpilot/plugins/
 
 
 Uninstall:

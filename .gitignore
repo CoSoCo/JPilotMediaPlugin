@@ -44,8 +44,8 @@ libtool
 stamp-h1
 Makefile
 
-# project files from make
+# project files from make / cc
 *.la
 *.lo
+*.so
 .libs
-

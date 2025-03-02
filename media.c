@@ -151,10 +151,10 @@ void freePathList(fullPath *list) {
     }
 }
 
-int parsePaths(char *paths, fullPath **list, char *text) {
+int parsePaths(char *paths, fullPath **list, const char *prefName) {
     for (char *last; *paths != '\0'; *--last = '\0') {
         if (!*(last = (last = strrchr(paths, ':')) ? last + 1 : paths)) {
-            jp_logf(L_WARN, "%s: WARNING: Empty name in %s.\n", MYNAME, text);
+            jp_logf(L_WARN, "%s: WARNING: Empty name in %s.\n", MYNAME, prefName);
             continue;
         }
         fullPath *item;
@@ -165,7 +165,7 @@ int parsePaths(char *paths, fullPath **list, char *text) {
                 item->volRef = atoi(last);
                 item->name = separator + 1;
             } else {
-                item->volRef = -1;
+                item->volRef = -1; // concerns all volumes
                 item->name = last;
             }
             item->next = *list;
@@ -175,7 +175,7 @@ int parsePaths(char *paths, fullPath **list, char *text) {
             (*list) = NULL;
             return EXIT_FAILURE;
         }
-        jp_logf(L_DEBUG, "%s: Got %s item: '%s' for Volume %d\n", MYNAME, text, (*list)->name, (*list)->volRef);
+        jp_logf(L_DEBUG, "%s: Got %s item: '%s' for Volume %d\n", MYNAME, prefName, (*list)->name, (*list)->volRef);
         if (last == paths)
             break;
     }
@@ -983,11 +983,11 @@ int plugin_sync(int socket) {
     jp_get_pref(prefs, 9, NULL, (const char **)&excludeDirs);
     jp_get_pref(prefs, 10, NULL, (const char **)&deleteFiles);
     jp_get_pref(prefs, 11, NULL, (const char **)&additionalFiles);
-    if (    parsePaths(rootDirs, &rootDirList, "rootDirs") != EXIT_SUCCESS ||
-            parsePaths(fileTypes, &fileTypeList, "fileTypes") != EXIT_SUCCESS ||
-            parsePaths(excludeDirs, &excludeDirList, "excludeDirs") != EXIT_SUCCESS ||
-            parsePaths(deleteFiles, &deleteFileList, "deleteFiles") != EXIT_SUCCESS ||
-            parsePaths(additionalFiles, &additionalFileList, "additionalFiles") != EXIT_SUCCESS ||
+    if (    parsePaths(rootDirs, &rootDirList, prefs[1].name) != EXIT_SUCCESS ||
+            parsePaths(fileTypes, &fileTypeList, prefs[3].name) != EXIT_SUCCESS ||
+            parsePaths(excludeDirs, &excludeDirList, prefs[9].name) != EXIT_SUCCESS ||
+            parsePaths(deleteFiles, &deleteFileList, prefs[10].name) != EXIT_SUCCESS ||
+            parsePaths(additionalFiles, &additionalFileList, prefs[11].name) != EXIT_SUCCESS ||
             !(piBuf = pi_buffer_new(32768)) || !(piBuf2 = pi_buffer_new(32768))) {
         jp_logf(L_FATAL, "%s: ERROR: Out of memory\n", MYNAME);
         return EXIT_FAILURE;
