@@ -14,7 +14,7 @@ Install dependencies:
   sudo apt install libpisock-dev # depends on libpisync1 libusb-dev libbluetooth-dev
 
 From the project folder:
-autoreconf -i
+autoreconf -i -s
 ./configure --prefix=/usr
 #./configure ## for local install
 make clean

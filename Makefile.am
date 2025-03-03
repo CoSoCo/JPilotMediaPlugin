@@ -1,6 +1,6 @@
 lib_LTLIBRARIES = libmedia.la
 
-libmedia_la_SOURCES = media.c libplugin.h
+libmedia_la_SOURCES = media.c
 
 libmedia_la_LDFLAGS = -avoid-version
 libmedia_la_LIBADD = @LIBS@ @PILOT_LIBS@
